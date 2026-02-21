@@ -7,21 +7,20 @@
 ---
 
 ## User Story
-* Setup core backend clients in `src/server/clients`
+* Setup core clients in `src/server/clients`
   * setup github client: https://docs.github.com/en/rest
   * setup retrvr.ai client: https://www.rtrvr.ai/
   * setup minimax.ai client: https://www.minimax.io/
-* Setup the DB
   * setup convex client: https://www.convex.dev/
 
 ---
 
 ## Constraints
-* No tests
+* Please refer to `docs/doctrine/{server,db}`
 ---
 
 ## References
-* n/a
+* I have already installed all dependencies. We just need to scaffold directory structures and wrappers. No tests needed.
 
 ---
 
