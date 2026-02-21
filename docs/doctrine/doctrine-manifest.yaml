@@ -1,0 +1,152 @@
+# Doctrine Manifest
+# Version: 1.0.0
+#
+# This manifest enables architect agents to select relevant doctrines
+# based on brief content without preloading all documentation.
+#
+# Usage:
+#   1. Agent scans brief for trigger keywords
+#   2. Matches triggers → identifies relevant doctrines
+#   3. Decides: self-load (1-2 docs) OR spawn specialists (3+)
+
+doctrines:
+  - id: db
+    name: Database Doctrine
+    triggers:
+      - database
+      - schema
+      - migration
+      - RLS
+      - RPC
+      - postgres
+      - supabase
+      - table
+      - column
+      - foreign key
+      - soft delete
+      - admin role
+      - has_role
+      - SECURITY DEFINER
+    summary: >
+      SECURITY DEFINER + SET search_path, soft delete with partial unique index,
+      admin.has_role() for authorization, RPC-only data access, structured error returns.
+    path: docs/doctrine/architecture/db/database-doctrine.md
+    specialist: db-architect
+
+  - id: server
+    name: Server Doctrine
+    triggers:
+      - tRPC
+      - router
+      - procedure
+      - edge function
+      - API
+      - mutation
+      - query
+      - protectedProcedure
+      - publicProcedure
+      - Zod
+      - validation
+      - TRPCError
+    summary: >
+      tRPC routers call RPC functions only (no direct table access), protectedProcedure
+      for user mutations, Zod schemas in separate files, error code mapping from RPC to tRPC.
+    path: docs/doctrine/architecture/server/server-doctrine.md
+    specialist: server-architect
+
+  - id: domain
+    name: Domain Logic Doctrine
+    triggers:
+      - entity
+      - aggregate
+      - factory
+      - Result
+      - DomainError
+      - pure function
+      - invariant
+      - validation
+      - hydration
+      - toProps
+      - fromProjection
+    summary: >
+      Entities with private readonly + getters + toProps(), factories validate invariants
+      and return Result<T, HydrationError>, tagged union errors with _tag discriminant.
+    path: docs/doctrine/architecture/domain/domain-doctrine.md
+    specialist: domain-architect
+
+  - id: frontend
+    name: Frontend Doctrine
+    triggers:
+      - component
+      - hook
+      - UI
+      - container
+      - skeleton
+      - React
+      - useQuery
+      - useMutation
+      - repository
+      - queryKeys
+      - realtime
+      - subscription
+    summary: >
+      Container/UI/Skeleton pattern, useDependencies() for DI, queryKeys factory,
+      repositories return Result<T, DomainError>, hydration via Factory.fromProps().
+    path: docs/doctrine/architecture/frontend/frontend-doctrine.md
+    specialist: frontend-architect
+
+  - id: style-math
+    name: Mathematical Style
+    triggers:
+      - AMM
+      - LMSR
+      - pricing
+      - cost function
+      - Decimal
+      - mathematical
+      - logSumExp
+      - numerical stability
+    summary: >
+      Chained expressions mirroring equations, cite papers not code mechanics,
+      Decimal end-to-end, tests assert invariants not scenarios.
+    path: docs/doctrine/architecture/style/a-math-programming-style.md
+    specialist: domain-architect  # Math style is subset of domain
+
+  - id: style-business
+    name: Business Logic Style
+    triggers:
+      - service
+      - orchestration
+      - workflow
+      - use case
+      - Clean Code
+    summary: >
+      Small functions, intention-revealing names, explicit control flow,
+      temporary variables for readability, object parameters with destructuring.
+    path: docs/doctrine/architecture/style/b-business-logic-programming-style.md
+    specialist: null  # General guidance, no specialist needed
+
+# ------------------------------------------------------------------------------
+# FMEA Footnote: Known Risks & Future Improvements
+# ------------------------------------------------------------------------------
+#
+# This manifest uses keyword triggers for doctrine selection. A formal FMEA
+# identified the following risks that are ACCEPTED for v1.0 but should be
+# addressed when scaling this system:
+#
+# | Rank | Failure Mode                | RPN | Mitigation (Future)                          |
+# |------|-----------------------------| ----|----------------------------------------------|
+# | 1    | Integration seam violations | 350 | Add adversary phase with seam checklist      |
+# | 2    | Wrong doctrine selected     | 270 | Replace triggers with impact-surface taxonomy|
+# | 3    | Complexity mis-estimation   | 270 | Formal scoring model for spawn decisions     |
+# | 4    | Doctrine drift              | 252 | Version pinning + content hash validation    |
+#
+# Next Steps (v2.0):
+#   1. Define impact surfaces: PERSISTENCE, AUTH, FINANCIAL, MUTATION, PUBLIC_EXPOSURE
+#   2. Create integration-seams.md defining cross-boundary contracts
+#   3. Add complexity scoring to brief template
+#   4. Generate doctrine hashes and validate before loading
+#   5. Record doctrine versions in spec output for audit trail
+#
+# Reference: Session transcript 2026-02-11, FMEA analysis
+# ------------------------------------------------------------------------------
