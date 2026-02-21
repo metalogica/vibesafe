@@ -14,10 +14,16 @@
     "test:unit:ci": "vitest test/unit --config vitest.config.unit.ts --coverage"
   },
   "dependencies": {
+    "clsx": "^2.1.1",
+    "convex": "^1.32.0",
     "husky": "^9.1.7",
+    "lucide-react": "^0.575.0",
+    "motion": "^12.34.3",
     "next": "16.1.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "recharts": "^3.7.0",
+    "tailwind-merge": "^3.5.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
