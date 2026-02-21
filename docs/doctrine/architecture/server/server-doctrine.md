@@ -49,7 +49,7 @@ convex/
 │
 ├── clients/
 │   ├── github.ts            # GitHub API client
-│   ├── minmax.ts            # MinMax agent client
+│   ├── minimax.ts            # MiniMax agent client
 │   └── retrvr.ts            # Retrvr.ai client
 │
 └── _generated/

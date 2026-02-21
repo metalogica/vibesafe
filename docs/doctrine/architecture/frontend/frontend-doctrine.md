@@ -1,6 +1,6 @@
-# Frontend Doctrine (Vite + React + Convex)
+# Frontend Doctrine (Next.js + React + Convex)
 
-**Version**: 1.0.0
+**Version**: 1.1.0
 **Status**: Binding
 **Date**: 2026-02-21
 **App**: Vibesafe
@@ -19,72 +19,134 @@ Keywords MUST, MUST NOT, SHOULD, MAY follow RFC 2119.
 
 | Layer | Technology |
 |-------|------------|
-| Framework | React 19 |
-| Bundler | Vite |
+| Framework | Next.js 16 (App Router) |
+| Language | TypeScript 5 (strict) |
+| UI Library | React 19 |
 | Styling | Tailwind CSS 4 |
 | Icons | Lucide React |
 | Charts | Recharts |
-| Animation | Motion |
-| Backend | Convex (real-time) |
+| Animation | Motion (v12+, imported as `motion/react`) |
+| Backend (planned) | Convex (real-time) |
 
 ---
 
 ## 3. Directory Structure
 
 ```
-src/
-├── main.tsx                 # App entry
-├── App.tsx                  # Root component + Convex provider
-├── index.css                # Tailwind imports
+app/                             # Next.js App Router
+├── layout.tsx                   # Root layout (fonts, metadata)
+├── globals.css                  # Tailwind imports + theme tokens
+└── page.tsx                     # Home page (renders SecurityAuditApp)
+
+src/frontend/                    # All React frontend code
+├── components/                  # UI components
+│   ├── SecurityAuditApp.tsx     # Main orchestrating component
+│   ├── AgentFeed.tsx            # Agent activity feed
+│   ├── DeploymentSafetyChart.tsx
+│   ├── VulnerabilitiesPanel.tsx
+│   └── VulnerabilityModal.tsx
 │
-├── components/              # Reusable UI components
-│   ├── Button.tsx
-│   ├── Card.tsx
-│   ├── Badge.tsx
-│   └── ...
+├── data/                        # Mock data (until Convex integration)
+│   └── mockAuditData.ts
 │
-├── pages/                   # Page components
-│   └── Dashboard.tsx
+├── lib/                         # Utilities
+│   └── cn.ts                    # clsx + tailwind-merge
 │
-├── hooks/                   # Custom hooks (if needed)
-│   └── useAuditPolling.ts
-│
-└── lib/                     # Utilities
-    ├── cn.ts                # clsx + tailwind-merge
-    └── constants.ts
+└── types.ts                     # Shared TypeScript types
 ```
 
 Flat structure. No feature folders, no DI, no repositories. Extract when complexity demands it.
 
 ---
 
-## 4. Convex Integration
+## 4. Next.js App Router Patterns
 
-### 4.1 Provider Setup
+### 4.1 Client Components
+
+All interactive components MUST have `'use client';` as the first line. This applies to any component using hooks, browser APIs, event handlers, or third-party libraries that require browser context (Motion, Recharts).
 
 ```typescript
-// src/App.tsx
-import { ConvexProvider, ConvexReactClient } from "convex/react";
+'use client';
 
-const convex = new ConvexReactClient(import.meta.env.VITE_CONVEX_URL);
+import { useState } from 'react';
 
-export default function App() {
+export function MyComponent() {
+  const [value, setValue] = useState('');
+  // ...
+}
+```
+
+### 4.2 Page Components
+
+Page components in `app/` are server components by default. They import and render client components:
+
+```typescript
+// app/page.tsx — Server component (no 'use client')
+import SecurityAuditApp from '@/src/frontend/components/SecurityAuditApp';
+
+export default function Home() {
+  return <SecurityAuditApp />;
+}
+```
+
+### 4.3 Path Aliases
+
+The `@/*` alias maps to the project root. All imports from `src/frontend/` use:
+
+```typescript
+import { cn } from '@/src/frontend/lib/cn';
+import type { Vulnerability } from '@/src/frontend/types';
+import { INITIAL_VULNERABILITIES } from '@/src/frontend/data/mockAuditData';
+```
+
+Relative imports are used only within the same directory level (e.g., `./AgentFeed`).
+
+---
+
+## 5. Convex Integration (Planned)
+
+Convex is not yet integrated. When added, follow these patterns:
+
+### 5.1 Provider Setup
+
+```typescript
+// app/providers.tsx
+'use client';
+
+import { ConvexProvider, ConvexReactClient } from 'convex/react';
+
+const convex = new ConvexReactClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
+
+export function ConvexClientProvider({ children }: { children: React.ReactNode }) {
+  return <ConvexProvider client={convex}>{children}</ConvexProvider>;
+}
+```
+
+```typescript
+// app/layout.tsx
+import { ConvexClientProvider } from './providers';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <ConvexProvider client={convex}>
-      <Dashboard />
-    </ConvexProvider>
+    <html lang="en">
+      <body>
+        <ConvexClientProvider>{children}</ConvexClientProvider>
+      </body>
+    </html>
   );
 }
 ```
 
-### 4.2 Queries (Real-time by Default)
+### 5.2 Queries (Real-time by Default)
 
 ```typescript
-import { useQuery } from "convex/react";
-import { api } from "../convex/_generated/api";
+'use client';
 
-function AnalysisFeed({ auditId }: { auditId: Id<"audits"> }) {
-  // Automatically updates when data changes
+import { useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
+
+function AnalysisFeed({ auditId }: { auditId: Id<'audits'> }) {
   const analyses = useQuery(api.analyses.listByAudit, { auditId });
 
   if (analyses === undefined) return <Skeleton />;
@@ -99,17 +161,19 @@ function AnalysisFeed({ auditId }: { auditId: Id<"audits"> }) {
 }
 ```
 
-### 4.3 Mutations
+### 5.3 Mutations
 
 ```typescript
-import { useMutation } from "convex/react";
-import { api } from "../convex/_generated/api";
+'use client';
+
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 
 function StartAuditButton({ repoUrl }: { repoUrl: string }) {
   const createAudit = useMutation(api.audits.create);
 
   const handleClick = async () => {
-    const auditId = await createAudit({ repoUrl, commitHash: "HEAD" });
+    const auditId = await createAudit({ repoUrl, commitHash: 'HEAD' });
     // Navigate or update UI
   };
 
@@ -117,13 +181,17 @@ function StartAuditButton({ repoUrl }: { repoUrl: string }) {
 }
 ```
 
-### 4.4 Actions (External APIs)
+### 5.4 Actions (External APIs)
 
 ```typescript
-import { useAction } from "convex/react";
-import { api } from "../convex/_generated/api";
+'use client';
 
-function RunAnalysisButton({ auditId }: { auditId: Id<"audits"> }) {
+import { useState } from 'react';
+import { useAction } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
+
+function RunAnalysisButton({ auditId }: { auditId: Id<'audits'> }) {
   const runAnalysis = useAction(api.services.auditService.runAnalysis);
   const [isRunning, setIsRunning] = useState(false);
 
@@ -138,7 +206,7 @@ function RunAnalysisButton({ auditId }: { auditId: Id<"audits"> }) {
 
   return (
     <Button onClick={handleClick} disabled={isRunning}>
-      {isRunning ? "Analyzing..." : "Run Analysis"}
+      {isRunning ? 'Analyzing...' : 'Run Analysis'}
     </Button>
   );
 }
@@ -146,33 +214,35 @@ function RunAnalysisButton({ auditId }: { auditId: Id<"audits"> }) {
 
 ---
 
-## 5. Component Patterns
+## 6. Component Patterns
 
-### 5.1 Utility: `cn()`
+### 6.1 Utility: `cn()`
 
 ```typescript
-// src/lib/cn.ts
-import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
+// src/frontend/lib/cn.ts
+import { type ClassValue, clsx } from 'clsx';
+import { twMerge } from 'tailwind-merge';
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 ```
 
-### 5.2 Basic Component
+### 6.2 Basic Component
 
 ```typescript
-// src/components/Badge.tsx
-import { cn } from "@/lib/cn";
+// src/frontend/components/Badge.tsx
+'use client';
 
-type Severity = "low" | "medium" | "high" | "critical";
+import { cn } from '@/src/frontend/lib/cn';
+
+type Severity = 'low' | 'medium' | 'high' | 'critical';
 
 const severityStyles: Record<Severity, string> = {
-  low: "bg-gray-500/20 text-gray-400",
-  medium: "bg-yellow-500/20 text-yellow-400",
-  high: "bg-orange-500/20 text-orange-400",
-  critical: "bg-red-500/20 text-red-400",
+  low: 'bg-gray-500/20 text-gray-400',
+  medium: 'bg-yellow-500/20 text-yellow-400',
+  high: 'bg-orange-500/20 text-orange-400',
+  critical: 'bg-red-500/20 text-red-400',
 };
 
 interface BadgeProps {
@@ -182,34 +252,14 @@ interface BadgeProps {
 
 export function Badge({ severity, children }: BadgeProps) {
   return (
-    <span className={cn("px-2 py-1 rounded text-xs font-medium", severityStyles[severity])}>
+    <span className={cn('rounded px-2 py-1 text-xs font-medium', severityStyles[severity])}>
       {children}
     </span>
   );
 }
 ```
 
-### 5.3 Card Component
-
-```typescript
-// src/components/Card.tsx
-import { cn } from "@/lib/cn";
-
-interface CardProps {
-  className?: string;
-  children: React.ReactNode;
-}
-
-export function Card({ className, children }: CardProps) {
-  return (
-    <div className={cn("bg-gray-900 border border-gray-800 rounded-lg p-4", className)}>
-      {children}
-    </div>
-  );
-}
-```
-
-### 5.4 Loading States
+### 6.3 Loading States
 
 ```typescript
 // Pattern: undefined = loading, null = not found, data = ready
@@ -224,23 +274,40 @@ MUST handle all three states. MUST NOT render stale data as if current.
 
 ---
 
-## 6. Styling Rules
+## 7. Styling Rules
 
-### 6.1 Tailwind Conventions
+### 7.1 VibeSafe Design Tokens
 
-| Element | Pattern |
-|---------|---------|
-| Background | `bg-gray-900` (cards), `bg-gray-950` (page) |
-| Borders | `border-gray-800` |
-| Text primary | `text-gray-100` |
-| Text secondary | `text-gray-400` |
-| Accent | `text-green-400` (safe), `text-red-400` (unsafe) |
+Theme tokens are defined in `app/globals.css` under `@theme inline`:
 
-### 6.2 Dark Mode
+| Token | Value | Usage |
+|-------|-------|-------|
+| `--color-bg-dark` | `#0B0F14` | Page background |
+| `--color-panel-dark` | `#0F1620` | Card/panel background |
+| `--color-divider-dark` | `#1C2430` | Borders, dividers |
+| `--color-accent-blue` | `#4DA3FF` | Primary accent, links, CTAs |
+| `--color-text-primary` | `#E6EEF8` | Primary text |
+| `--color-text-secondary` | `#8FA3B8` | Secondary text, labels |
+| `--font-display` | Syne | Display headings (loaded via `next/font/google`) |
+
+Components currently use Tailwind arbitrary values (e.g., `bg-[#0B0F14]`). These MAY be migrated to theme token classes in a future pass.
+
+### 7.2 Semantic Color Conventions
+
+| Meaning | Color |
+|---------|-------|
+| Safe / Fixed | `text-emerald-400`, `bg-emerald-500/10` |
+| Unsafe / Critical | `text-red-400`, `bg-red-500/10` |
+| Warning / High | `text-orange-400`, `bg-orange-500/10` |
+| Needs Work / Medium | `text-yellow-400`, `bg-yellow-500/10` |
+| Info / Low | `text-blue-400`, `bg-blue-500/10` |
+| Accent | `text-[#4DA3FF]`, `bg-[#4DA3FF]` |
+
+### 7.3 Dark Mode
 
 App is dark mode only. MUST NOT include light mode styles.
 
-### 6.3 Responsive
+### 7.4 Responsive
 
 Mobile-first. Use `sm:`, `md:`, `lg:` prefixes for larger screens.
 
@@ -250,9 +317,9 @@ Mobile-first. Use `sm:`, `md:`, `lg:` prefixes for larger screens.
 
 ---
 
-## 7. State Management
+## 8. State Management
 
-### 7.1 Server State
+### 8.1 Server State (Post-Convex)
 
 Convex handles all server state. MUST NOT duplicate in React state.
 
@@ -267,48 +334,24 @@ useEffect(() => {
 const analyses = useQuery(api.analyses.listByAudit, { auditId });
 ```
 
-### 7.2 UI State
+### 8.2 UI State
 
 Local UI state (modals, tabs, form inputs) uses `useState`:
 
 ```typescript
-const [activeTab, setActiveTab] = useState<"all" | "critical">("all");
-const [repoUrl, setRepoUrl] = useState("");
+const [activeTab, setActiveTab] = useState<'all' | 'critical'>('all');
+const [repoUrl, setRepoUrl] = useState('');
 ```
 
-### 7.3 Form State
+### 8.3 Mock State (Pre-Convex)
 
-For the repo URL input, simple `useState` is sufficient:
-
-```typescript
-function RepoInput({ onSubmit }: { onSubmit: (url: string) => void }) {
-  const [url, setUrl] = useState("");
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (url.trim()) onSubmit(url.trim());
-  };
-
-  return (
-    <form onSubmit={handleSubmit}>
-      <input
-        type="url"
-        value={url}
-        onChange={(e) => setUrl(e.target.value)}
-        placeholder="https://github.com/owner/repo"
-        className="bg-gray-800 border border-gray-700 rounded px-3 py-2"
-      />
-      <Button type="submit">Start Audit</Button>
-    </form>
-  );
-}
-```
+Until Convex is integrated, mock data lives in `src/frontend/data/` and state is managed via `useState` + `useRef` in the orchestrating component. This will be replaced by Convex queries/subscriptions.
 
 ---
 
-## 8. Error Handling
+## 9. Error Handling
 
-### 8.1 Query Errors
+### 9.1 Query Errors (Post-Convex)
 
 Convex queries don't throw by default. Handle missing data:
 
@@ -319,7 +362,7 @@ if (audit === undefined) return <Loading />;
 if (audit === null) return <div>Audit not found</div>;
 ```
 
-### 8.2 Mutation Errors
+### 9.2 Mutation Errors
 
 Mutations can throw. Wrap in try/catch:
 
@@ -330,72 +373,61 @@ const handleSubmit = async () => {
   try {
     await createAudit({ repoUrl, commitHash });
   } catch (error) {
-    toast.error("Failed to create audit");
+    toast.error('Failed to create audit');
   }
 };
 ```
 
-### 8.3 Action Errors
-
-Actions return structured results (per database doctrine):
-
-```typescript
-const result = await runAnalysis({ auditId });
-if (!result.success) {
-  toast.error(result.error.message);
-}
-```
-
 ---
 
-## 9. File Naming
+## 10. File Naming
 
 | Type | Pattern | Example |
 |------|---------|---------|
-| Component | `PascalCase.tsx` | `AuditCard.tsx` |
+| Component | `PascalCase.tsx` | `AgentFeed.tsx` |
 | Hook | `use{Name}.ts` | `useAuditStatus.ts` |
-| Utility | `camelCase.ts` | `formatDate.ts` |
-| Constants | `camelCase.ts` | `constants.ts` |
-| Types | Colocate in component or `types.ts` | — |
+| Utility | `camelCase.ts` | `cn.ts` |
+| Constants / Data | `camelCase.ts` | `mockAuditData.ts` |
+| Types | `types.ts` (shared) or colocated | `src/frontend/types.ts` |
 
 ---
 
-## 10. Testing
+## 11. Testing
 
-### 10.1 Component Tests
+### 11.1 Component Tests
 
 Use Vitest + React Testing Library:
 
 ```typescript
-import { render, screen } from "@testing-library/react";
-import { Badge } from "./Badge";
+import { render, screen } from '@testing-library/react';
+import { Badge } from '@/src/frontend/components/Badge';
 
-test("renders critical badge with correct style", () => {
+test('renders critical badge with correct style', () => {
   render(<Badge severity="critical">SEC-001</Badge>);
 
-  const badge = screen.getByText("SEC-001");
-  expect(badge).toHaveClass("text-red-400");
+  const badge = screen.getByText('SEC-001');
+  expect(badge).toHaveClass('text-red-400');
 });
 ```
 
-### 10.2 Integration Tests
+### 11.2 Integration Tests (Post-Convex)
 
 For components using Convex, mock the hooks:
 
 ```typescript
-import { vi } from "vitest";
-import * as convexReact from "convex/react";
+import { vi } from 'vitest';
+import * as convexReact from 'convex/react';
 
-vi.spyOn(convexReact, "useQuery").mockReturnValue([
-  { _id: "1", title: "Test Analysis", level: "critical" },
+vi.spyOn(convexReact, 'useQuery').mockReturnValue([
+  { _id: '1', title: 'Test Analysis', level: 'critical' },
 ]);
 ```
 
 ---
 
-## 11. Performance
+## 12. Performance
 
-### 11.1 Query Granularity
+### 12.1 Query Granularity (Post-Convex)
 
 Prefer multiple small queries over one large query:
 
@@ -403,34 +435,33 @@ Prefer multiple small queries over one large query:
 // ✓ GOOD: components subscribe to what they need
 const audit = useQuery(api.audits.get, { auditId });
 const analyses = useQuery(api.analyses.listByAudit, { auditId });
-const evaluation = useQuery(api.evaluations.getByAudit, { auditId });
 
 // ✗ AVOID: one mega-query that returns everything
 const everything = useQuery(api.audits.getWithAllRelations, { auditId });
 ```
 
-### 11.2 Conditional Queries
+### 12.2 Conditional Queries
 
 Skip queries when data isn't needed:
 
 ```typescript
-// Only fetch when audit is complete
 const evaluation = useQuery(
   api.evaluations.getByAudit,
-  audit?.status === "complete" ? { auditId } : "skip"
+  audit?.status === 'complete' ? { auditId } : 'skip',
 );
 ```
 
 ---
 
-## 12. Future Extraction Path
+## 13. Future Extraction Path
 
 If Vibesafe grows:
 
-1. **Multiple pages** → Add React Router, create `pages/` directory
-2. **Shared component library** → Extract to `components/ui/` with Storybook
+1. **Multiple pages** → Use Next.js App Router `app/` directory (already in place)
+2. **Shared component library** → Extract to `src/frontend/components/ui/` with Storybook
 3. **Complex forms** → Add React Hook Form + Zod
 4. **Global UI state** → Add Zustand for modals, toasts, sidebar
+5. **Convex integration** → Replace mock data with real-time subscriptions
 
 This is a refactor, not a rewrite.
 
@@ -441,4 +472,4 @@ This is a refactor, not a rewrite.
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0.0 | 2026-02-21 | Initial minimal frontend doctrine for Vibesafe |
-
+| 1.1.0 | 2026-02-21 | Updated for Next.js 16 App Router: directory structure, path aliases, `'use client'` patterns, VibeSafe design tokens, mock state section |
