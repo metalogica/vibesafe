@@ -15,42 +15,43 @@ doctrines:
     triggers:
       - database
       - schema
-      - migration
-      - RLS
-      - RPC
-      - postgres
-      - supabase
+      - Convex
+      - convex
       - table
-      - column
-      - foreign key
-      - soft delete
-      - admin role
-      - has_role
-      - SECURITY DEFINER
+      - index
+      - defineTable
+      - defineSchema
+      - query
+      - mutation
+      - internalMutation
+      - internalQuery
     summary: >
-      SECURITY DEFINER + SET search_path, soft delete with partial unique index,
-      admin.has_role() for authorization, RPC-only data access, structured error returns.
+      Convex schema with defineSchema/defineTable, v.id() for foreign keys,
+      indexes for all query patterns, queries/mutations/actions separation,
+      internal functions for service-to-service calls, real-time by default.
     path: docs/doctrine/architecture/db/database-doctrine.md
     specialist: db-architect
 
   - id: server
     name: Server Doctrine
     triggers:
-      - tRPC
-      - router
-      - procedure
-      - edge function
+      - Convex action
+      - action
+      - client
       - API
-      - mutation
-      - query
-      - protectedProcedure
-      - publicProcedure
+      - external API
+      - GitHub
+      - Claude
+      - Anthropic
+      - fetch
       - Zod
       - validation
-      - TRPCError
+      - audit service
+      - orchestration
     summary: >
-      tRPC routers call RPC functions only (no direct table access), protectedProcedure
-      for user mutations, Zod schemas in separate files, error code mapping from RPC to tRPC.
+      Convex Actions for external API calls (GitHub REST, Anthropic Messages API),
+      structured result returns ({ success, data } | { success, error }), Zod validation
+      on all external responses, clients never throw exceptions.
     path: docs/doctrine/architecture/server/server-doctrine.md
     specialist: server-architect
 

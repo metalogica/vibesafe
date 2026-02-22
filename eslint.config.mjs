@@ -25,6 +25,7 @@ const eslintConfig = [
       "infra/**",
       "supabase/**",
       ".orchestrator",
+      "convex/**",
     ],
   },
 

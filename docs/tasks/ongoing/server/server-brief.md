@@ -7,16 +7,16 @@
 ---
 
 ## User Story
-* Setup core clients in `src/server/clients`
+* Setup core clients that will be required for core `ingest` and `audit` services
   * setup github client: https://docs.github.com/en/rest
-  * setup retrvr.ai client: https://www.rtrvr.ai/
-  * setup minimax.ai client: https://www.minimax.io/
+  * setup claude code client for analysis and evaluation: https://platform.claude.com/docs/en/home
   * setup convex client: https://www.convex.dev/
 
 ---
 
 ## Constraints
 * Please refer to `docs/doctrine/{server,db}`
+* Please refer to the protcols in `docs/protocol/{ingestion,audit}`
 ---
 
 ## References
@@ -37,7 +37,7 @@
 ---
 
 ## Open Questions
-* n/a
+* assume i have all api keys required in `.env`. We show the boilerplate in `.env.local`.
 
 ---
 
