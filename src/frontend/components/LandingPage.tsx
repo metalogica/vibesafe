@@ -103,7 +103,7 @@ export function LandingPage() {
             <div className="relative w-full max-w-[500px] aspect-square">
               <div className="absolute inset-0 bg-[#4DA3FF]/20 rounded-full blur-[80px]" />
               <img
-                src="/roastybara-logo.png"
+                src="https://res.cloudinary.com/dk9mn4cvz/image/upload/v1771718850/Roastybara-Character-Hero-transparent_e9v8yi.png"
                 alt="Roastybara Hero"
                 className="relative z-10 w-full h-full object-contain drop-shadow-2xl transform hover:scale-105 transition-transform duration-500"
               />
