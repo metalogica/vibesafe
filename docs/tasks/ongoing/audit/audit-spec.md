@@ -1,6 +1,6 @@
 # Audit Feature: Technical Specification
 
-**Version**: 1.1.0
+**Version**: 1.2.0
 **Status**: Draft
 **Author**: Architect Agent
 **Date**: 2026-02-21
@@ -28,6 +28,7 @@ Connect the existing Convex backend (schema, mutations, queries, Claude + GitHub
 - `pnpm app:lint` passes
 - `pnpm app:build` succeeds
 - `pnpm test:unit:ci` passes with all new tests green
+- **Phase 5 smoke tests pass** (agent-driven via `/chrome` against `pnpm app:dev` + `pnpm db:dev`) — see Section 11
 
 ---
 
@@ -1524,9 +1525,183 @@ Run with: `pnpm vitest test/unit/frontend/lib/auditMappers.test.ts --config vite
 
 ---
 
+## 11. Manual Smoke Tests (Phase 5)
+
+Phase 5 is executed by a Claude agent with `/chrome` (Chrome DevTools MCP) against a running local stack (`pnpm app:dev` + `pnpm db:dev`). The agent navigates the app, observes real-time state, and asserts each user-story criterion from the brief.
+
+### 11.1 Prerequisites
+
+Before running smoke tests the agent must:
+
+1. Start the Convex dev backend: `pnpm db:dev` (background)
+2. Start the Next.js dev server: `pnpm app:dev` (background)
+3. Wait for both to be healthy (Next.js prints `Ready` on stdout, Convex prints `✓ Connected`)
+4. Confirm required env vars are set: `NEXT_PUBLIC_CONVEX_URL`, `CLAUDE_CODE_API_KEY`, `GITHUB_API_KEY`
+
+### 11.2 Test Repo
+
+Use `https://github.com/anthropics/anthropic-cookbook` (or any small, public repo) as the test URL. It should be small enough to complete in under 2 minutes.
+
+### 11.3 Smoke Test Cases
+
+Each test is a sequential step the agent executes via `/chrome`. The **Assert** line is the pass/fail criterion — the agent must verify it before proceeding.
+
+---
+
+#### ST-1: Page loads
+
+1. Navigate to `http://localhost:3000`
+2. **Assert**: Page renders with the VibeSafe header, a GitHub URL input field, and a "Start Audit" button. The button is disabled (input is empty). No console errors.
+
+---
+
+#### ST-2: Start audit
+
+1. Click the URL input field.
+2. Type `https://github.com/anthropics/anthropic-cookbook`.
+3. Click the "Start Audit" button.
+4. **Assert**: Button text changes to "Auditing..." with a spinner. The status pill changes to "Auditing...". The Agent Activity Feed shows a "Live" indicator.
+
+---
+
+#### ST-3: Ingestion events stream
+
+1. Wait up to 15 seconds after ST-2.
+2. **Assert**: The Agent Activity Feed contains at least 2 messages from the **Ingestion** agent (indigo icon). The first message mentions "Fetching repository". A subsequent message mentions a file count (e.g. "Found N source files").
+
+---
+
+#### ST-4: Analysis events stream
+
+1. Wait up to 120 seconds total from ST-2 (the Claude call may take a while).
+2. **Assert**: The Agent Activity Feed contains at least 1 message from the **Security Analyst** agent (emerald icon). Each analyst message mentions a vulnerability title and a severity level.
+
+---
+
+#### ST-5: Vulnerabilities appear in left pane
+
+1. After at least one Security Analyst event appears:
+2. **Assert**: The Vulnerabilities panel on the left contains at least 1 vulnerability card. Each card shows a title, severity badge (colored: red/orange/yellow/blue), and a file path or "(architectural)".
+
+---
+
+#### ST-6: Severity filter works
+
+1. Identify a severity level that has at least 1 vulnerability (e.g. "high").
+2. Click the corresponding filter pill in the Vulnerabilities panel header.
+3. **Assert**: Only vulnerabilities of that severity are visible. Other severity cards are hidden.
+4. Click the "all" filter pill.
+5. **Assert**: All vulnerabilities are visible again.
+
+---
+
+#### ST-7: Vulnerability modal opens with detail
+
+1. Click on any vulnerability card in the left pane.
+2. **Assert**: A modal appears with:
+   - The vulnerability title in the header
+   - A severity badge
+   - A "Description" section with non-empty text
+   - A "Business & Security Impact" section with non-empty text
+   - A "Remediation Plan" section
+   - A "Copy Instructions" button
+   - A vulnerability ID (format `SEC-X-NNN`)
+3. Click the X button or the backdrop to close the modal.
+4. **Assert**: Modal is dismissed.
+
+---
+
+#### ST-8: Audit completes with evaluator summary
+
+1. Wait for the audit to finish (status pill changes from "Auditing..." to "Report Ready", or the feed shows an **Evaluator** message).
+2. **Assert**: The Agent Activity Feed contains at least 1 message from the **Evaluator** agent (purple icon). The message contains a summary (e.g. "Audit Complete" or "No security vulnerabilities").
+
+---
+
+#### ST-9: Audit summary chart renders
+
+1. After the audit completes:
+2. **Assert**: The Audit Summary section shows a chart with at least 1 data point. The data point displays a percentage score (0–100%). If score is ≥ 70% the label area says "Safe", 40–70% says "Needs Work", < 40% says "Unsafe".
+
+---
+
+#### ST-10: Failed audit shows error (negative path)
+
+1. Clear the URL input.
+2. Type `https://github.com/this-org-does-not-exist/fake-repo-404`.
+3. Click "Start Audit".
+4. Wait up to 30 seconds.
+5. **Assert**: The audit fails and an error message is visible in the UI (e.g. "Repository not found. Is it public?" or similar). The status returns to a non-auditing state.
+
+---
+
+### 11.4 Pass Criteria
+
+All 10 smoke tests (ST-1 through ST-10) must pass. If any assert fails, the test is a failure and the agent must report which step failed, include a screenshot, and describe the observed vs expected state.
+
+### 11.5 Environment Teardown
+
+After all smoke tests complete, stop the background `pnpm app:dev` and `pnpm db:dev` processes.
+
+---
+
+### Phase 5: Smoke Tests via /chrome
+
+> Gate: All 10 smoke tests pass (ST-1 through ST-10)
+
+#### Step 5.1: Start local stack
+
+Start `pnpm db:dev` and `pnpm app:dev` as background processes. Wait for both to print their ready messages. Confirm `http://localhost:3000` is reachable.
+
+##### Verify
+- `curl -s -o /dev/null -w "%{http_code}" http://localhost:3000` returns 200
+
+##### Timeout
+60000
+
+#### Step 5.2: Run smoke tests ST-1 through ST-9 (happy path)
+
+Using `/chrome`, execute smoke tests ST-1 through ST-9 sequentially as defined in Section 11.3. After each assert, take a screenshot as evidence. If any assert fails, capture the screenshot, report the failure, and continue to the next test to get full coverage.
+
+Use the test repo URL: `https://github.com/anthropics/anthropic-cookbook`
+
+Wait a maximum of 3 minutes total for the audit to complete (ingestion + Claude analysis + evaluation).
+
+##### Verify
+- ST-1 through ST-9 assertions all passed (agent self-reports)
+
+##### Timeout
+300000
+
+#### Step 5.3: Run smoke test ST-10 (negative path)
+
+Using `/chrome`, execute ST-10 (invalid repo URL). Verify the error message appears and the UI recovers to a usable state.
+
+##### Verify
+- ST-10 assertion passed (agent self-reports)
+
+##### Timeout
+60000
+
+#### Step 5.4: Tear down local stack
+
+Stop the background `pnpm db:dev` and `pnpm app:dev` processes.
+
+##### Verify
+- `lsof -i :3000 | grep LISTEN` returns empty (port freed)
+
+##### Timeout
+30000
+
+#### Gate
+- All 10 smoke tests (ST-1 through ST-10) passed
+
+---
+
 ## Change Log
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.2.0 | 2026-02-21 | Added Section 11 (Manual Smoke Tests) and Phase 5 (execution via /chrome). 10 smoke tests covering full user story: page load, audit start, ingestion streaming, analysis streaming, vulnerability panel, severity filter, modal detail, evaluator summary, chart rendering, negative path. Updated success criteria in Section 1.3. |
 | 1.1.0 | 2026-02-21 | FMEA mitigations: action budget/watchdog (#1), GitHub error normalizer (#2), vulnerability sanitizer (#3), mapper contract tests (#4). Added Sections 4.5-4.7, rewrote Section 5.1 action with try/catch envelope + triple-bounded loop, updated Phase 1/3/4 execution steps. |
 | 1.0.0 | 2026-02-21 | Initial specification |
