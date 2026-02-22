@@ -1,6 +1,6 @@
 # Services Doctrine (Convex Actions + External APIs)
 
-**Version**: 1.0.0
+**Version**: 1.1.0
 **Status**: Binding
 **Date**: 2026-02-21
 **App**: Vibesafe
@@ -18,23 +18,23 @@ Keywords MUST, MUST NOT, SHOULD, MAY follow RFC 2119.
 ## 2. Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      Convex Actions                              │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                   Audit Service                          │    │
-│  │            (orchestrates the audit flow)                 │    │
-│  └──────────────────────┬──────────────────────────────────┘    │
-│                         │                                        │
-│         ┌───────────────┼───────────────┐                       │
-│         ▼               ▼               ▼                       │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐                │
-│  │   GitHub   │  │   MinMax   │  │   Retrvr   │                │
-│  │   Client   │  │   Client   │  │   Client   │                │
-│  └────────────┘  └────────────┘  └────────────┘                │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
++---------------------------------------------------------------+
+|                      Convex Actions                           |
++---------------------------------------------------------------+
+|                                                               |
+|  +-------------------------------------------------------+   |
+|  |                   Audit Service                        |   |
+|  |            (orchestrates the audit flow)               |   |
+|  +---------------------+--------------------------------+   |
+|                         |                                     |
+|         +---------------+---------------+                     |
+|         v                               v                     |
+|  +--------------+              +--------------+               |
+|  |   GitHub     |              |   Claude     |               |
+|  |   Client     |              |   Client     |               |
+|  +--------------+              +--------------+               |
+|                                                               |
++---------------------------------------------------------------+
 ```
 
 ---
@@ -48,9 +48,8 @@ convex/
 │   └── schemas.ts           # Zod schemas for external responses
 │
 ├── clients/
-│   ├── github.ts            # GitHub API client
-│   ├── minimax.ts            # MiniMax agent client
-│   └── retrvr.ts            # Retrvr.ai client
+│   ├── github.ts            # GitHub REST API client
+│   └── claude.ts            # Anthropic Messages API client
 │
 └── _generated/
 ```
@@ -59,66 +58,144 @@ convex/
 
 ## 4. Client Pattern
 
-### 4.1 Base Client Structure
+### 4.1 Result Type Convention
+
+All clients MUST return structured results and MUST NOT throw:
+
+```typescript
+type ClientResult<T> =
+  | { success: true; data: T }
+  | { success: false; error: { code: string; message: string } };
+```
+
+### 4.2 GitHub Client
 
 ```typescript
 // convex/clients/github.ts
 
 const GITHUB_API_BASE = "https://api.github.com";
 
-export interface GitHubFile {
+export interface GitHubTreeEntry {
   path: string;
+  mode: string;
+  type: "blob" | "tree";
+  sha: string;
+  size?: number;
+}
+
+export interface GitHubTreeResponse {
+  sha: string;
+  tree: GitHubTreeEntry[];
+  truncated: boolean;
+}
+
+export interface GitHubBlobResponse {
   content: string;
+  encoding: "base64" | "utf-8";
+  size: number;
 }
 
-export interface GitHubClientResult<T> {
-  success: true;
-  data: T;
-} | {
-  success: false;
-  error: { code: string; message: string };
+type GitHubClientResult<T> =
+  | { success: true; data: T }
+  | { success: false; error: { code: string; message: string } };
+
+function getHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github.v3+json",
+  };
+  if (process.env.GITHUB_API_KEY) {
+    headers.Authorization = `Bearer ${process.env.GITHUB_API_KEY}`;
+  }
+  return headers;
 }
 
-export async function fetchRepoContents(
-  repoUrl: string
-): Promise<GitHubClientResult<GitHubFile[]>> {
+export async function fetchRepoTree(
+  owner: string,
+  repo: string,
+  branch = "HEAD",
+): Promise<GitHubClientResult<GitHubTreeResponse>> {
   try {
-    // Parse owner/repo from URL
-    const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
-    if (!match) {
+    const response = await fetch(
+      `${GITHUB_API_BASE}/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`,
+      { headers: getHeaders() },
+    );
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        return {
+          success: false,
+          error: { code: "NOT_FOUND", message: "Repository not found" },
+        };
+      }
+      if (response.status === 403) {
+        const rateLimitRemaining =
+          response.headers.get("X-RateLimit-Remaining");
+        if (rateLimitRemaining === "0") {
+          const resetTime = response.headers.get("X-RateLimit-Reset");
+          const minutes = resetTime
+            ? Math.ceil((Number(resetTime) * 1000 - Date.now()) / 60000)
+            : 0;
+          return {
+            success: false,
+            error: {
+              code: "RATE_LIMIT",
+              message: `GitHub rate limit hit. Try again in ${minutes} minutes.`,
+            },
+          };
+        }
+        return {
+          success: false,
+          error: {
+            code: "PRIVATE_REPO",
+            message: "Repository is private or inaccessible",
+          },
+        };
+      }
       return {
         success: false,
-        error: { code: "INVALID_URL", message: "Invalid GitHub URL format" },
+        error: {
+          code: "GITHUB_ERROR",
+          message: `GitHub API error: ${response.status}`,
+        },
       };
     }
 
-    const [, owner, repo] = match;
+    const data = (await response.json()) as GitHubTreeResponse;
+    return { success: true, data };
+  } catch (error) {
+    return {
+      success: false,
+      error: {
+        code: "NETWORK_ERROR",
+        message: error instanceof Error ? error.message : "Unknown error",
+      },
+    };
+  }
+}
 
+export async function fetchBlob(
+  owner: string,
+  repo: string,
+  sha: string,
+): Promise<GitHubClientResult<GitHubBlobResponse>> {
+  try {
     const response = await fetch(
-      `${GITHUB_API_BASE}/repos/${owner}/${repo}/contents`,
-      {
-        headers: {
-          Accept: "application/vnd.github.v3+json",
-          // Add token if available for higher rate limits
-          ...(process.env.GITHUB_TOKEN && {
-            Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
-          }),
-        },
-      }
+      `${GITHUB_API_BASE}/repos/${owner}/${repo}/git/blobs/${sha}`,
+      { headers: getHeaders() },
     );
 
     if (!response.ok) {
       return {
         success: false,
         error: {
-          code: response.status === 404 ? "NOT_FOUND" : "GITHUB_ERROR",
+          code: "GITHUB_ERROR",
           message: `GitHub API error: ${response.status}`,
         },
       };
     }
 
-    const files = await response.json();
-    return { success: true, data: files };
+    const data = (await response.json()) as GitHubBlobResponse;
+    return { success: true, data };
   } catch (error) {
     return {
       success: false,
@@ -131,47 +208,48 @@ export async function fetchRepoContents(
 }
 ```
 
-### 4.2 MinMax Client
+### 4.3 Claude Client
+
+Uses the Anthropic Messages API for security analysis.
 
 ```typescript
-// convex/clients/minmax.ts
+// convex/clients/claude.ts
 
 import { z } from "zod";
-import { MinMaxAnalysisSchema } from "../services/schemas";
+import {
+  ClaudeAnalysisResponseSchema,
+  type Vulnerability,
+} from "../services/schemas";
 
-const MINMAX_API_BASE = "https://api.minimax.io"; // Replace with actual
+const ANTHROPIC_API_BASE = "https://api.anthropic.com";
+const ANTHROPIC_VERSION = "2023-06-01";
+const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
 
-export interface MinMaxAnalysis {
-  category: string;
-  level: "low" | "medium" | "high" | "critical";
-  title: string;
-  description: string;
-  filePath?: string;
-  fix?: string;
-}
-
-export interface MinMaxClientResult {
-  success: true;
-  data: { analyses: MinMaxAnalysis[] };
-} | {
-  success: false;
-  error: { code: string; message: string };
-}
+type ClaudeClientResult<T> =
+  | { success: true; data: T }
+  | { success: false; error: { code: string; message: string } };
 
 export async function runSecurityAnalysis(
-  repoContents: string,
-  options?: { maxVulnerabilities?: number }
-): Promise<MinMaxClientResult> {
+  files: { path: string; content: string }[],
+): Promise<ClaudeClientResult<{ vulnerabilities: Vulnerability[] }>> {
   try {
-    const response = await fetch(`${MINMAX_API_BASE}/analyze`, {
+    const response = await fetch(`${ANTHROPIC_API_BASE}/v1/messages`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.MINMAX_API_KEY}`,
+        "x-api-key": process.env.CLAUDE_CODE_API_KEY ?? "",
+        "anthropic-version": ANTHROPIC_VERSION,
       },
       body: JSON.stringify({
-        prompt: buildSecurityPrompt(repoContents),
-        max_results: options?.maxVulnerabilities ?? 10,
+        model: DEFAULT_MODEL,
+        max_tokens: 8192,
+        system: SECURITY_ANALYST_SYSTEM_PROMPT,
+        messages: [
+          {
+            role: "user",
+            content: buildAnalysisPrompt(files),
+          },
+        ],
       }),
     });
 
@@ -179,27 +257,55 @@ export async function runSecurityAnalysis(
       if (response.status === 429) {
         return {
           success: false,
-          error: { code: "RATE_LIMIT", message: "MinMax rate limit exceeded" },
+          error: { code: "RATE_LIMIT", message: "Anthropic rate limit exceeded" },
         };
       }
       return {
         success: false,
-        error: { code: "MINMAX_ERROR", message: `API error: ${response.status}` },
+        error: { code: "CLAUDE_ERROR", message: `Anthropic API error: ${response.status}` },
       };
     }
 
     const raw = await response.json();
 
-    // Validate response shape
-    const parsed = z.array(MinMaxAnalysisSchema).safeParse(raw.analyses);
-    if (!parsed.success) {
+    // Validate Anthropic response shape
+    const anthropicParsed = AnthropicMessageSchema.safeParse(raw);
+    if (!anthropicParsed.success) {
       return {
         success: false,
-        error: { code: "INVALID_RESPONSE", message: parsed.error.message },
+        error: { code: "INVALID_RESPONSE", message: "Invalid Anthropic response shape" },
       };
     }
 
-    return { success: true, data: { analyses: parsed.data } };
+    const textContent = anthropicParsed.data.content[0]?.text;
+    if (!textContent) {
+      return {
+        success: false,
+        error: { code: "INVALID_RESPONSE", message: "Empty response from Claude" },
+      };
+    }
+
+    // Parse JSON from Claude's text response
+    let analysisJson: unknown;
+    try {
+      analysisJson = JSON.parse(textContent);
+    } catch {
+      return {
+        success: false,
+        error: { code: "INVALID_RESPONSE", message: "Claude response is not valid JSON" },
+      };
+    }
+
+    // Validate analysis structure
+    const analysisParsed = ClaudeAnalysisResponseSchema.safeParse(analysisJson);
+    if (!analysisParsed.success) {
+      return {
+        success: false,
+        error: { code: "INVALID_RESPONSE", message: analysisParsed.error.message },
+      };
+    }
+
+    return { success: true, data: analysisParsed.data };
   } catch (error) {
     return {
       success: false,
@@ -211,79 +317,25 @@ export async function runSecurityAnalysis(
   }
 }
 
-function buildSecurityPrompt(repoContents: string): string {
-  return `
-You are a security analyst. Analyze this codebase for vulnerabilities.
+// Internal helpers
 
-For each vulnerability found, provide:
-- category: The type (e.g., "authentication", "injection", "exposure")
-- level: "low" | "medium" | "high" | "critical"
-- title: Short description
-- description: Detailed explanation
-- filePath: The file containing the vulnerability (if applicable)
-- fix: Recommended remediation
+const AnthropicMessageSchema = z.object({
+  content: z.array(
+    z.object({
+      type: z.literal("text"),
+      text: z.string(),
+    }),
+  ),
+});
 
-Codebase:
-${repoContents}
-`.trim();
-}
-```
+const SECURITY_ANALYST_SYSTEM_PROMPT = `You are an expert security analyst...`;
+// Full prompt defined in convex/clients/claude.ts — see implementation.
 
-### 4.3 Retrvr Client
-
-```typescript
-// convex/clients/retrvr.ts
-
-const RETRVR_API_BASE = "https://api.retriever.ai"; // Replace with actual
-
-export interface RetrvrLink {
-  url: string;
-  title: string;
-  snippet: string;
-}
-
-export interface RetrvrClientResult {
-  success: true;
-  data: { links: RetrvrLink[] };
-} | {
-  success: false;
-  error: { code: string; message: string };
-}
-
-export async function searchRelatedHacks(
-  vulnerabilityTitle: string
-): Promise<RetrvrClientResult> {
-  try {
-    const response = await fetch(`${RETRVR_API_BASE}/search`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.RETRVR_API_KEY}`,
-      },
-      body: JSON.stringify({
-        query: `${vulnerabilityTitle} security breach exploit CVE`,
-        max_results: 3,
-      }),
-    });
-
-    if (!response.ok) {
-      return {
-        success: false,
-        error: { code: "RETRVR_ERROR", message: `API error: ${response.status}` },
-      };
-    }
-
-    const data = await response.json();
-    return { success: true, data: { links: data.results ?? [] } };
-  } catch (error) {
-    return {
-      success: false,
-      error: {
-        code: "NETWORK_ERROR",
-        message: error instanceof Error ? error.message : "Unknown error",
-      },
-    };
-  }
+function buildAnalysisPrompt(files: { path: string; content: string }[]): string {
+  const fileContents = files
+    .map((f) => `// File: ${f.path}\n${f.content}`)
+    .join("\n\n---\n\n");
+  return `Analyze the following codebase for security vulnerabilities:\n\n${fileContents}\n\nIdentify all security vulnerabilities and respond with JSON.`;
 }
 ```
 
@@ -296,7 +348,7 @@ export async function searchRelatedHacks(
 
 import { z } from "zod";
 
-export const MinMaxAnalysisSchema = z.object({
+export const VulnerabilitySchema = z.object({
   category: z.string(),
   level: z.enum(["low", "medium", "high", "critical"]),
   title: z.string(),
@@ -305,18 +357,11 @@ export const MinMaxAnalysisSchema = z.object({
   fix: z.string().optional(),
 });
 
-export const MinMaxResponseSchema = z.object({
-  analyses: z.array(MinMaxAnalysisSchema),
+export const ClaudeAnalysisResponseSchema = z.object({
+  vulnerabilities: z.array(VulnerabilitySchema),
 });
 
-export const RetrvrLinkSchema = z.object({
-  url: z.string().url(),
-  title: z.string(),
-  snippet: z.string(),
-});
-
-export type MinMaxAnalysis = z.infer<typeof MinMaxAnalysisSchema>;
-export type RetrvrLink = z.infer<typeof RetrvrLinkSchema>;
+export type Vulnerability = z.infer<typeof VulnerabilitySchema>;
 ```
 
 MUST validate all external API responses with Zod before using.
@@ -329,134 +374,85 @@ MUST validate all external API responses with Zod before using.
 // convex/services/auditService.ts
 
 import { v } from "convex/values";
-import { action, internalMutation } from "../_generated/server";
+import { action } from "../_generated/server";
 import { internal } from "../_generated/api";
-import { fetchRepoContents } from "../clients/github";
-import { runSecurityAnalysis } from "../clients/minmax";
-import { searchRelatedHacks } from "../clients/retrvr";
+import { runSecurityAnalysis } from "../clients/claude";
 
-// Result type for actions
 type AuditResult =
-  | { success: true; data: { analysisCount: number; probability: number } }
+  | { success: true; data: { vulnerabilityCount: number; probability: number } }
   | { success: false; error: { code: string; message: string } };
 
 export const runAudit = action({
-  args: { auditId: v.id("audits") },
-  handler: async (ctx, { auditId }): Promise<AuditResult> => {
-    // 1. Get audit details
-    const audit = await ctx.runQuery(internal.audits.getInternal, { auditId });
-    if (!audit) {
-      return { success: false, error: { code: "NOT_FOUND", message: "Audit not found" } };
-    }
-
-    // 2. Update status to analyzing
+  args: {
+    auditId: v.id("audits"),
+    files: v.array(v.object({ path: v.string(), content: v.string() })),
+  },
+  handler: async (ctx, { auditId, files }): Promise<AuditResult> => {
+    // 1. Update status to analyzing
     await ctx.runMutation(internal.audits.updateStatus, {
-      auditId,
-      status: "analyzing",
+      auditId, status: "analyzing",
     });
 
-    // 3. Fetch repo contents
-    const repoResult = await fetchRepoContents(audit.repoUrl);
-    if (!repoResult.success) {
-      await ctx.runMutation(internal.audits.updateStatus, {
-        auditId,
-        status: "failed",
-      });
-      return { success: false, error: repoResult.error };
-    }
-
-    // 4. Run MinMax analysis
-    const repoContents = repoResult.data
-      .map((f) => `// ${f.path}\n${f.content}`)
-      .join("\n\n");
-
-    const analysisResult = await runSecurityAnalysis(repoContents);
+    // 2. Call Claude for security analysis
+    const analysisResult = await runSecurityAnalysis(files);
     if (!analysisResult.success) {
-      await ctx.runMutation(internal.audits.updateStatus, {
-        auditId,
-        status: "failed",
+      await ctx.runMutation(internal.audits.fail, {
+        auditId, error: analysisResult.error.message,
       });
       return { success: false, error: analysisResult.error };
     }
 
-    // 5. Store analyses (with optional Retrvr enrichment)
-    for (const analysis of analysisResult.data.analyses) {
-      // Optional: Enrich with related hack links
-      const linksResult = await searchRelatedHacks(analysis.title);
-      const links = linksResult.success ? linksResult.data.links.map((l) => l.url) : [];
+    const vulnerabilities = analysisResult.data.vulnerabilities;
 
-      await ctx.runMutation(internal.analyses.create, {
-        auditId,
-        category: analysis.category,
-        level: analysis.level,
-        title: analysis.title,
-        description: analysis.description,
-        filePath: analysis.filePath,
-        fix: analysis.fix,
-        links,
+    // 3. Store each vulnerability + create feed event
+    for (let i = 0; i < vulnerabilities.length; i++) {
+      const vuln = vulnerabilities[i];
+      const seqNumber = i + 1;
+      const displayId = generateDisplayId(auditId, seqNumber);
+
+      const analysisId = await ctx.runMutation(internal.analyses.create, {
+        auditId, seqNumber, displayId,
+        category: vuln.category, level: vuln.level,
+        title: vuln.title, description: vuln.description,
+        filePath: vuln.filePath, fix: vuln.fix,
+      });
+
+      await ctx.runMutation(internal.auditEvents.create, {
+        auditId, agent: "SECURITY_ANALYST",
+        message: generateAnalystMessage(vuln, displayId),
+        analysisId,
       });
     }
 
-    // 6. Update status to evaluating
+    // 4. Evaluate + complete
     await ctx.runMutation(internal.audits.updateStatus, {
-      auditId,
-      status: "evaluating",
+      auditId, status: "evaluating",
     });
 
-    // 7. Generate evaluation (probability score)
-    const probability = calculateSafetyProbability(analysisResult.data.analyses);
-    const summary = generateExecutiveSummary(analysisResult.data.analyses);
+    const probability = calculateSafetyProbability(vulnerabilities);
+    const executiveSummary = generateExecutiveSummary(vulnerabilities);
 
     await ctx.runMutation(internal.evaluations.create, {
-      auditId,
-      probability,
-      executiveSummary: summary,
+      auditId, probability, executiveSummary,
     });
 
-    // 8. Mark complete
+    await ctx.runMutation(internal.auditEvents.create, {
+      auditId, agent: "EVALUATOR", message: executiveSummary,
+    });
+
     await ctx.runMutation(internal.audits.updateStatus, {
-      auditId,
-      status: "complete",
+      auditId, status: "complete",
     });
 
     return {
       success: true,
-      data: {
-        analysisCount: analysisResult.data.analyses.length,
-        probability,
-      },
+      data: { vulnerabilityCount: vulnerabilities.length, probability },
     };
   },
 });
 
-// Pure functions for scoring
-function calculateSafetyProbability(analyses: { level: string }[]): number {
-  if (analyses.length === 0) return 100;
-
-  const weights = { critical: 40, high: 25, medium: 10, low: 5 };
-  const totalPenalty = analyses.reduce(
-    (sum, a) => sum + (weights[a.level as keyof typeof weights] ?? 0),
-    0
-  );
-
-  return Math.max(0, 100 - totalPenalty);
-}
-
-function generateExecutiveSummary(analyses: { level: string; title: string }[]): string {
-  const critical = analyses.filter((a) => a.level === "critical").length;
-  const high = analyses.filter((a) => a.level === "high").length;
-
-  if (critical > 0) {
-    return `${critical} critical and ${high} high severity vulnerabilities found. Deployment unsafe.`;
-  }
-  if (high > 0) {
-    return `${high} high severity vulnerabilities found. Review recommended before deployment.`;
-  }
-  if (analyses.length > 0) {
-    return `${analyses.length} low/medium issues found. Generally safe for deployment with minor fixes.`;
-  }
-  return "No vulnerabilities detected. Safe for deployment.";
-}
+// Pure functions: calculateSafetyProbability, generateExecutiveSummary,
+// generateDisplayId, generateAnalystMessage — see implementation.
 ```
 
 ---
@@ -466,26 +462,29 @@ function generateExecutiveSummary(analyses: { level: string; title: string }[]):
 | Code | Source | Meaning |
 |------|--------|---------|
 | `INVALID_URL` | GitHub | URL doesn't match github.com pattern |
-| `NOT_FOUND` | GitHub | Repository doesn't exist or is private |
+| `NOT_FOUND` | GitHub/Convex | Entity doesn't exist |
+| `PRIVATE_REPO` | GitHub | 403 without rate limit headers |
+| `RATE_LIMIT` | GitHub/Claude | API quota exceeded |
 | `GITHUB_ERROR` | GitHub | Other GitHub API error |
-| `RATE_LIMIT` | MinMax/Retrvr | API quota exceeded |
-| `MINMAX_ERROR` | MinMax | Agent API failure |
-| `RETRVR_ERROR` | Retrvr | Search API failure |
-| `INVALID_RESPONSE` | Any | Response failed Zod validation |
+| `CLAUDE_ERROR` | Claude | Anthropic API failure |
+| `INVALID_RESPONSE` | Claude | Response failed Zod validation |
 | `NETWORK_ERROR` | Any | Fetch failed |
+| `AGENT_ERROR` | Service | Analysis call failed |
 
 ---
 
 ## 8. Environment Variables
 
 ```bash
-# .env.local (for Convex)
-GITHUB_TOKEN=ghp_xxxx          # Optional: higher rate limits
-MINMAX_API_KEY=sk-xxxx         # Required
-RETRVR_API_KEY=sk-xxxx         # Required
+# Set in Convex dashboard (server-side, accessed via process.env in actions)
+GITHUB_API_KEY=ghp_xxxx          # GitHub personal access token
+CLAUDE_CODE_API_KEY=sk-xxxx      # Anthropic API key
+
+# Set in .env.local (client-side, used by Next.js ConvexClientProvider)
+NEXT_PUBLIC_CONVEX_URL=https://xxx.convex.cloud
 ```
 
-MUST NOT commit secrets. MUST use Convex environment variables in production.
+MUST NOT commit secrets. MUST use Convex environment variables for server-side keys.
 
 ---
 
@@ -496,7 +495,6 @@ MUST NOT commit secrets. MUST use Convex environment variables in production.
 - Clients MUST validate external responses with Zod
 - Actions MUST update audit status on failure
 - Actions MUST handle partial success gracefully
-- MUST NOT block on optional enrichment (Retrvr failure shouldn't fail audit)
 - SHOULD log errors server-side for debugging
 
 ---
@@ -509,24 +507,19 @@ Mock `fetch` and test all paths:
 
 ```typescript
 import { vi, test, expect } from "vitest";
-import { fetchRepoContents } from "./github";
-
-test("returns INVALID_URL for malformed URL", async () => {
-  const result = await fetchRepoContents("not-a-github-url");
-
-  expect(result.success).toBe(false);
-  expect(result.error.code).toBe("INVALID_URL");
-});
+import { fetchRepoTree } from "./github";
 
 test("returns NOT_FOUND for 404", async () => {
   vi.spyOn(global, "fetch").mockResolvedValueOnce(
     new Response(null, { status: 404 })
   );
 
-  const result = await fetchRepoContents("https://github.com/fake/repo");
+  const result = await fetchRepoTree("fake", "repo");
 
   expect(result.success).toBe(false);
-  expect(result.error.code).toBe("NOT_FOUND");
+  if (!result.success) {
+    expect(result.error.code).toBe("NOT_FOUND");
+  }
 });
 ```
 
@@ -537,30 +530,31 @@ Use `convex-test` with mocked clients:
 ```typescript
 import { convexTest } from "convex-test";
 import { vi, test, expect } from "vitest";
-import * as github from "../clients/github";
-import * as minmax from "../clients/minmax";
+import * as claude from "../clients/claude";
 
 test("runAudit completes successfully", async () => {
-  vi.spyOn(github, "fetchRepoContents").mockResolvedValue({
+  vi.spyOn(claude, "runSecurityAnalysis").mockResolvedValue({
     success: true,
-    data: [{ path: "index.ts", content: "console.log('hello')" }],
-  });
-
-  vi.spyOn(minmax, "runSecurityAnalysis").mockResolvedValue({
-    success: true,
-    data: { analyses: [] },
+    data: { vulnerabilities: [] },
   });
 
   const t = convexTest(schema);
   const auditId = await t.mutation(api.audits.create, {
     repoUrl: "https://github.com/test/repo",
+    repoOwner: "test",
+    repoName: "repo",
     commitHash: "abc123",
   });
 
-  const result = await t.action(api.services.auditService.runAudit, { auditId });
+  const result = await t.action(api.services.auditService.runAudit, {
+    auditId,
+    files: [{ path: "index.ts", content: "console.log('hello')" }],
+  });
 
   expect(result.success).toBe(true);
-  expect(result.data.probability).toBe(100);
+  if (result.success) {
+    expect(result.data.probability).toBe(100);
+  }
 });
 ```
 
@@ -570,10 +564,11 @@ test("runAudit completes successfully", async () => {
 
 If Vibesafe grows:
 
-1. **Retry logic** — Add exponential backoff for transient failures
-2. **Queue system** — Use Convex scheduled functions for long-running audits
-3. **Streaming** — Stream analyses to frontend as they're generated
-4. **Caching** — Cache GitHub file contents to avoid re-fetching
+1. **Retrvr integration** — Search for related CVEs/hacks per vulnerability (enrich `audit_analyses.links`)
+2. **Retry logic** — Add exponential backoff for transient failures
+3. **Queue system** — Use Convex scheduled functions for long-running audits
+4. **Streaming** — Stream analyses to frontend as they're generated
+5. **Caching** — Cache GitHub file contents to avoid re-fetching
 
 ---
 
@@ -582,3 +577,4 @@ If Vibesafe grows:
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0.0 | 2026-02-21 | Initial services doctrine for Vibesafe |
+| 1.1.0 | 2026-02-21 | Replace MinMax/Retrvr with Anthropic Claude API; update all client patterns, schemas, error codes, env vars, and test examples to match implementation |
