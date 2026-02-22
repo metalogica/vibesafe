@@ -1,5 +1,5 @@
-import SecurityAuditApp from '@/src/frontend/components/SecurityAuditApp';
+import { LandingPage } from '@/src/frontend/components/LandingPage';
 
 export default function Home() {
-  return <SecurityAuditApp />;
+  return <LandingPage />;
 }

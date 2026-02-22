@@ -36,10 +36,13 @@ Keywords MUST, MUST NOT, SHOULD, MAY follow RFC 2119.
 app/                             # Next.js App Router
 ├── layout.tsx                   # Root layout (fonts, metadata)
 ├── globals.css                  # Tailwind imports + theme tokens
-└── page.tsx                     # Home page (renders SecurityAuditApp)
+├── page.tsx                     # Landing page (renders LandingPage)
+└── roast/
+    └── page.tsx                 # Audit dashboard (renders SecurityAuditApp, reads ?url= param)
 
 src/frontend/                    # All React frontend code
 ├── components/                  # UI components
+│   ├── LandingPage.tsx          # Marketing landing page with CTA → /roast
 │   ├── SecurityAuditApp.tsx     # Main orchestrating component (Convex subscriptions)
 │   ├── AgentFeed.tsx            # Agent activity feed (ingestion/security/evaluator)
 │   ├── DeploymentSafetyChart.tsx
@@ -80,10 +83,22 @@ Page components in `app/` are server components by default. They import and rend
 
 ```typescript
 // app/page.tsx — Server component (no 'use client')
-import SecurityAuditApp from '@/src/frontend/components/SecurityAuditApp';
+import { LandingPage } from '@/src/frontend/components/LandingPage';
 
 export default function Home() {
-  return <SecurityAuditApp />;
+  return <LandingPage />;
+}
+
+// app/roast/page.tsx — Server component with searchParams
+import SecurityAuditApp from '@/src/frontend/components/SecurityAuditApp';
+
+export default async function RoastPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ url?: string }>;
+}) {
+  const { url } = await searchParams;
+  return <SecurityAuditApp initialUrl={url} />;
 }
 ```
 
