@@ -8,6 +8,7 @@
     "app:compile:watch": "tsc --noEmit --watch",
     "app:dev": "next dev",
     "app:build": "next build",
+    "vercel-build": "npx convex deploy && next build",
     "app:start": "next start",
     "app:lint": "eslint",
     "prepare": "husky",

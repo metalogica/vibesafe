@@ -23,8 +23,8 @@ import type {
   Vulnerability,
 } from '@/src/frontend/types';
 
-import { api } from '../../../convex/_generated/api';
-import type { Id } from '../../../convex/_generated/dataModel';
+import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
 import {
   mapAnalysisToVulnerability,
   mapEventToMessage,
