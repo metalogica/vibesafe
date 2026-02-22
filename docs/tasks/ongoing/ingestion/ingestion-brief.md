@@ -7,49 +7,42 @@
 ---
 
 ## User Story
-* Setup core backend infra
-  * setup github client
-  * setup convex
-  *
+* I paste a public URL in the search bar and hit Start Audit (e.g https://github.com/swirl-xyz/swirl)
+* The ingestion system downloads the repo according to the specification in `docs/protocol/ingestion/ingestion-protocol.md`
+* The audit system then executes according to `docs/protocol/audit/audit-protocol.md`:
+  * I can see the live agent activity feed stream from convex, and see assessments in the vulnerabilities pane on the left stream in real time.
+    * I if click on the assessment in the left pane I can see the modal appear with detailed responses.
+    * I can filter for assessments in the lfet pane.
+  * When the audit is complete i see the audit summary chart appear with a score from the evaluator
 
 ---
 
 ## Constraints
 
-- MUST: <hard requirement>
-- MUST NOT: <prohibition>
-- SHOULD: <soft preference>
+- MUST: follow `protocol/{ingestion,audit}`
+- SHOULD: follow `docs/doctrine`
 
 ---
 
 ## References
-
-<!-- Always include architecture references relevant to your feature -->
-- Architecture: `docs/doctrine/architecture/` (select relevant doctrines)
-- Ledger: `docs/specs/domain/ledger-design.md` (if financial)
-- Markets: `docs/specs/markets/` (if market-related)
-- Existing code: `src/domain/<feature>/` (if extending)
+* n/a
 
 ---
 
 ## Acceptance Criteria
-
-- [ ] <Observable behavior with binary pass/fail>
-- [ ] <Observable behavior with binary pass/fail>
+* app should build
+* app should pass lint
+* ts compiler compiles
 
 ---
 
 ## Out of Scope
-
-- <Thing that might seem related but isn't>
-- <Future enhancement to defer>
+* n/a
 
 ---
 
 ## Open Questions
-
-1. <Question you want the architect to explore>
-2. <Ambiguity that needs resolution>
+* If there is any ambiguity about the modal and if you need to update the data model to incliude 'detailed asssesment' text let me know in advance.
 
 ---
 

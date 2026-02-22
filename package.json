@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "db:dev": "npx convex dev",
     "app:compile": "tsc --noEmit",
     "app:compile:watch": "tsc --noEmit --watch",
     "app:dev": "next dev",
