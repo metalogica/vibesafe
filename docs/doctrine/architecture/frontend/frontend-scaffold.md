@@ -1,6 +1,6 @@
 # Frontend Component Scaffold (Next.js + Convex)
 
-**Version**: 1.1.0
+**Version**: 1.2.0
 **Status**: Reference
 **Date**: 2026-02-21
 **App**: Vibesafe
@@ -83,108 +83,51 @@ function AnalysisListSkeleton() {
 
 ---
 
-## 3. Component with Mutation (Post-Convex)
+## 3. Component with Mutation + Subscriptions (Create + Schedule Pattern)
 
 ```typescript
-// src/frontend/components/StartAuditForm.tsx
+// src/frontend/components/AuditPage.tsx
 'use client';
 
-import { useState } from 'react';
-import { useMutation } from 'convex/react';
-import { api } from '@/convex/_generated/api';
-
-interface StartAuditFormProps {
-  onSuccess?: (auditId: string) => void;
-}
-
-export function StartAuditForm({ onSuccess }: StartAuditFormProps) {
-  const [repoUrl, setRepoUrl] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const createAudit = useMutation(api.audits.create);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-
-    try {
-      const auditId = await createAudit({
-        repoUrl: repoUrl.trim(),
-        commitHash: 'HEAD',
-      });
-      setRepoUrl('');
-      onSuccess?.(auditId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create audit');
-    }
-  };
-
-  return (
-    <form onSubmit={handleSubmit} className="flex gap-2">
-      <input
-        type="url"
-        value={repoUrl}
-        onChange={(e) => setRepoUrl(e.target.value)}
-        placeholder="https://github.com/owner/repo"
-        className="flex-1 rounded border border-[#1C2430] bg-[#0F1620] px-3 py-2 text-[#E6EEF8]"
-        required
-      />
-      <button
-        type="submit"
-        className="rounded bg-[#4DA3FF] px-4 py-2 font-medium text-white hover:bg-[#3b82f6]"
-      >
-        Start Audit
-      </button>
-      {error && <p className="text-sm text-red-400">{error}</p>}
-    </form>
-  );
-}
-```
-
----
-
-## 4. Component with Action (Post-Convex)
-
-```typescript
-// src/frontend/components/RunAnalysisButton.tsx
-'use client';
-
-import { useState } from 'react';
-import { useAction } from 'convex/react';
+import { useState, useMemo } from 'react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
+import { mapAnalysisToVulnerability, mapEventToMessage } from '@/src/frontend/lib/auditMappers';
 
-interface RunAnalysisButtonProps {
-  auditId: Id<'audits'>;
-}
-
-export function RunAnalysisButton({ auditId }: RunAnalysisButtonProps) {
-  const [isRunning, setIsRunning] = useState(false);
+export function AuditPage() {
+  const [repoUrl, setRepoUrl] = useState('');
+  const [currentAuditId, setCurrentAuditId] = useState<Id<'audits'> | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const runAnalysis = useAction(api.services.auditService.runAnalysis);
 
-  const handleClick = async () => {
-    setIsRunning(true);
+  // Mutation: creates record + schedules action
+  const createAndStart = useMutation(api.audits.createAndStart);
+
+  // Subscriptions: skip when no audit is active
+  const audit = useQuery(api.audits.get, currentAuditId ? { auditId: currentAuditId } : 'skip');
+  const events = useQuery(api.auditEvents.listByAudit, currentAuditId ? { auditId: currentAuditId } : 'skip');
+  const analyses = useQuery(api.analyses.listByAudit, currentAuditId ? { auditId: currentAuditId } : 'skip');
+
+  // Derived state: map Convex docs to view models
+  const messages = useMemo(() => (events ?? []).map(mapEventToMessage), [events]);
+  const vulnerabilities = useMemo(() => (analyses ?? []).map(mapAnalysisToVulnerability), [analyses]);
+
+  const handleStart = async () => {
     setError(null);
-
-    const result = await runAnalysis({ auditId });
-
-    if (!result.success) {
-      setError(result.error.message);
+    try {
+      const result = await createAndStart({ repoUrl });
+      setCurrentAuditId(result.auditId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start audit');
     }
-
-    setIsRunning(false);
   };
 
   return (
     <div>
-      <button
-        onClick={handleClick}
-        disabled={isRunning}
-        className="rounded bg-[#4DA3FF] px-4 py-2 font-medium text-white hover:bg-[#3b82f6] disabled:opacity-50"
-      >
-        {isRunning ? 'Analyzing...' : 'Run Analysis'}
-      </button>
-      {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
+      <input value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} placeholder="https://github.com/owner/repo" />
+      <button onClick={handleStart}>Start Audit</button>
+      {error && <p className="text-sm text-red-400">{error}</p>}
+      {audit?.status === 'failed' && <p className="text-sm text-red-400">{audit.error}</p>}
     </div>
   );
 }
@@ -192,7 +135,45 @@ export function RunAnalysisButton({ auditId }: RunAnalysisButtonProps) {
 
 ---
 
-## 5. Pure Client Component (Pre-Convex / Mock Data)
+## 4. Mapper Pattern (Convex Doc → View Model)
+
+```typescript
+// src/frontend/lib/auditMappers.ts
+import type { Doc } from '../../../convex/_generated/dataModel';
+import type { AgentMessage, Vulnerability } from '../types';
+
+const AGENT_MAP: Record<string, AgentMessage['agent']> = {
+  INGESTION: 'ingestion',
+  SECURITY_ANALYST: 'security',
+  EVALUATOR: 'evaluator',
+};
+
+export function mapEventToMessage(event: Doc<'audit_events'>): AgentMessage {
+  return {
+    id: event._id,
+    agent: AGENT_MAP[event.agent] ?? 'security',
+    text: event.message,
+    timestamp: event._creationTime,
+  };
+}
+
+export function mapAnalysisToVulnerability(analysis: Doc<'audit_analyses'>): Vulnerability {
+  return {
+    id: analysis.displayId,
+    title: analysis.title,
+    file: analysis.filePath ?? '(architectural)',
+    severity: analysis.level,
+    category: analysis.category,
+    description: analysis.description,
+    impact: analysis.impact ?? '',
+    fix: analysis.fix ?? '',
+  };
+}
+```
+
+---
+
+## 5. Presentational Component (Props-Driven)
 
 ```typescript
 // src/frontend/components/ExamplePanel.tsx
@@ -281,4 +262,5 @@ Until then, keep it in one file.
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0.0 | 2026-02-21 | Initial minimal scaffold for Vibesafe |
+| 1.2.0 | 2026-02-21 | Convex integration: replaced pre-Convex mutation template with create+schedule pattern, added mapper pattern template, replaced action template |
 | 1.1.0 | 2026-02-21 | Updated for Next.js 16 App Router: `'use client'` directives, corrected import paths, VibeSafe color tokens, added pre-Convex template |

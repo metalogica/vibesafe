@@ -1,6 +1,6 @@
 # Domain Logic Doctrine (Convex)
 
-**Version**: 1.0.0
+**Version**: 1.1.0
 **Status**: Binding
 **Date**: 2026-02-21
 **App**: Vibesafe
@@ -15,45 +15,65 @@ Keywords MUST, MUST NOT, SHOULD, MAY follow RFC 2119.
 
 ---
 
-## 2. Decision: No Separate Domain Layer
+## 2. Decision: Lightweight Domain Layer for Shared Pure Functions
 
-Vibesafe does not have a standalone domain layer. This is intentional.
+Vibesafe has a lightweight `src/domain/` layer containing **pure functions** that are shared between the Convex backend and the frontend, or that are complex enough to warrant isolated unit testing. It does NOT have traditional DDD entities, factories, or repository abstractions.
 
 ### Rationale
 
 | Concern | Traditional Approach | Vibesafe Approach |
 |---------|---------------------|-------------------|
 | Type definitions | `domain/types.ts` | `convex/schema.ts` (single source of truth) |
-| Validation | Factory classes with Result types | Convex schema validators (`v.string()`, `v.union()`) |
+| Validation | Factory classes with Result types | Convex schema validators + Zod for external input |
 | State transitions | Pure functions in domain | Inline in Convex mutations |
 | Repository abstraction | `IRepository` ports | Direct `ctx.db` calls (Convex is the repository) |
 | Error handling | Tagged union `DomainError` | Throw in queries, structured return in actions |
+| Shared pure logic | Domain services | `src/domain/audit/` pure functions |
 
-### Why This Works for Vibesafe
+### What Goes in `src/domain/`
 
-1. **Simple domain** — Audits have linear state (pending → analyzing → evaluating → complete). No complex invariants.
-2. **Convex handles persistence + validation** — Schema validators reject bad data at the edge.
-3. **4-hour MVP** — Ceremony doesn't pay off until you have multiple consumers of domain logic.
-4. **Single backend** — No need to abstract over multiple data sources.
+Extract logic into `src/domain/` when it meets ANY of these criteria:
+
+1. **Shared between Convex backend and frontend** (e.g., `parseGitHubUrl`, `calculateSafetyProbability`)
+2. **Complex enough for isolated unit testing** (e.g., `sanitizeVulnerabilities`, `normalizeGitHubError`)
+3. **Safety-critical guards** that protect against runtime failure modes (e.g., `isOverBudget`, `shouldIncludeFile`)
+
+### What Stays Inline in Convex
+
+- State transitions (handled by mutations)
+- Database queries and writes
+- Simple validation (handled by Convex schema validators)
+- Orchestration logic (lives in action handlers)
 
 ---
 
 ## 3. Where Logic Lives
 
 ```
+src/domain/audit/                   # Pure functions (shared, testable)
+├── parseGitHubUrl.ts               # URL parsing + validation
+├── fileFilter.ts                   # Ingestion file inclusion rules
+├── tokenEstimator.ts               # Token budget + file priority
+├── evaluator.ts                    # Safety scoring + display formatting
+├── actionBudget.ts                 # Wall-clock budget guard (FMEA #1)
+├── normalizeGitHubError.ts         # GitHub error classification (FMEA #2)
+└── sanitizeVulnerabilities.ts      # Post-Zod sanitization (FMEA #3)
+
 convex/
-├── schema.ts           # Types + validation (source of truth)
-├── audits.ts           # Audit CRUD + state transitions
-├── analyses.ts         # Analysis CRUD
-├── evaluations.ts      # Evaluation CRUD
-└── services/
-    └── auditService.ts # Agent orchestration
+├── schema.ts                       # Types + validation (source of truth)
+├── audits.ts                       # Audit CRUD + createAndStart
+├── auditEvents.ts                  # Feed event CRUD
+├── analyses.ts                     # Analysis CRUD
+├── evaluations.ts                  # Evaluation CRUD
+├── clients/                        # External API clients
+└── services/                       # Orchestration actions
 ```
 
 - **Types**: Defined in `schema.ts`, inferred elsewhere via `Doc<"audits">`
 - **Validation**: Convex schema validators for DB writes, Zod for external API input
 - **State transitions**: Inline in mutations
-- **Business rules**: Inline in mutations (extract if reused 3+ times)
+- **Shared pure logic**: `src/domain/audit/` — imported by both Convex actions and frontend components
+- **Business rules**: Inline in mutations unless shared or complex (then extract to `src/domain/`)
 
 ---
 
@@ -150,11 +170,12 @@ analyses.sort((a, b) => SEVERITY_ORDER[a.level] - SEVERITY_ORDER[b.level]);
 
 ## 7. When to Extract
 
-Extract logic into a pure function when:
+Extract logic into `src/domain/` when ANY of these apply:
 
-1. **Used 3+ times** across different mutations/queries
-2. **Complex enough to warrant isolated testing** (more than 5 lines)
-3. **Shared between server and client** (rare in Convex)
+1. **Shared between Convex and frontend** (e.g., `parseGitHubUrl` used in mutation args validation AND frontend URL normalization)
+2. **Complex enough to warrant isolated testing** (more than 5 lines of logic with branching)
+3. **Safety-critical guard** protecting against FMEA failure modes (e.g., budget overflow, input sanitization)
+4. **Used 3+ times** across different mutations/queries
 
 Until then, inline it.
 
@@ -162,57 +183,61 @@ Until then, inline it.
 
 ## 8. Testing
 
+### 8.1 Domain Pure Functions
+
+Domain functions in `src/domain/audit/` are tested with Vitest in `test/unit/domain/audit/`:
+
+```typescript
+// test/unit/domain/audit/parseGitHubUrl.test.ts
+import { parseGitHubUrl } from '@/src/domain/audit/parseGitHubUrl';
+
+describe('parseGitHubUrl', () => {
+  it('parses a valid GitHub URL', () => {
+    expect(parseGitHubUrl('https://github.com/owner/repo')).toEqual({
+      owner: 'owner', repo: 'repo',
+    });
+  });
+
+  it('returns null for non-GitHub URLs', () => {
+    expect(parseGitHubUrl('https://gitlab.com/owner/repo')).toBeNull();
+  });
+});
+```
+
+### 8.2 Convex Functions
+
 Tests go directly against Convex functions using `convex-test`:
 
 ```typescript
 // convex/audits.test.ts
 import { convexTest } from "convex-test";
-import { expect, test } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 
-test("createAudit sets status to pending", async () => {
+test("createAndStart sets status to pending", async () => {
   const t = convexTest(schema);
 
-  const auditId = await t.mutation(api.audits.create, {
+  const { auditId } = await t.mutation(api.audits.createAndStart, {
     repoUrl: "https://github.com/test/repo",
-    commitHash: "abc123",
   });
 
   const audit = await t.query(api.audits.get, { auditId });
   expect(audit.status).toBe("pending");
 });
-
-test("cannot skip status states", async () => {
-  const t = convexTest(schema);
-
-  const auditId = await t.mutation(api.audits.create, {
-    repoUrl: "https://github.com/test/repo",
-    commitHash: "abc123",
-  });
-
-  // Should throw - can't go from pending to complete
-  await expect(
-    t.mutation(api.audits.updateStatus, { auditId, status: "complete" })
-  ).rejects.toThrow("INVALID_STATE");
-});
 ```
 
-For Zod schemas:
+### 8.3 Zod Schemas
 
 ```typescript
-// convex/services/schemas.test.ts
-import { expect, test } from "vitest";
-import { MinMaxAnalysisSchema } from "./schemas";
+import { VulnerabilitySchema } from "./schemas";
 
 test("rejects invalid severity level", () => {
-  const result = MinMaxAnalysisSchema.safeParse({
+  const result = VulnerabilitySchema.safeParse({
     category: "auth",
-    level: "super-critical", // invalid
+    level: "super-critical",
     title: "Test",
     description: "Test",
   });
-
   expect(result.success).toBe(false);
 });
 ```
@@ -221,15 +246,14 @@ test("rejects invalid severity level", () => {
 
 ## 9. Future Extraction Path
 
-If Vibesafe grows and needs a proper domain layer:
+If Vibesafe grows beyond the current scope:
 
-1. Create `src/domain/` directory
-2. Move types from `convex/schema.ts` to `domain/types.ts`
-3. Create factory functions with Result types
-4. Create repository ports (`IAuditRepository`)
-5. Implement Convex adapter that wraps `ctx.db`
+1. Add more feature-specific directories under `src/domain/` (e.g., `src/domain/billing/`)
+2. Create factory functions with Result types if invariants become complex
+3. Create repository ports (`IAuditRepository`) only if multiple data sources appear
+4. Move types from `convex/schema.ts` to `domain/types.ts` only if decoupling from Convex becomes necessary
 
-This is a refactor, not a rewrite. The inline logic extracts cleanly.
+This is a refactor, not a rewrite. The pure functions already extracted to `src/domain/audit/` form the foundation.
 
 ---
 
@@ -237,4 +261,5 @@ This is a refactor, not a rewrite. The inline logic extracts cleanly.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.1.0 | 2026-02-21 | Audit feature: introduced src/domain/audit/ pure function layer for shared/testable/safety-critical logic; updated extraction criteria and testing patterns |
 | 1.0.0 | 2026-02-21 | Initial doctrine — documented decision to skip domain layer |

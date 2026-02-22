@@ -1,5 +1,5 @@
 # Doctrine Manifest
-# Version: 1.0.0
+# Version: 1.1.0
 #
 # This manifest enables architect agents to select relevant doctrines
 # based on brief content without preloading all documentation.
@@ -25,10 +25,14 @@ doctrines:
       - mutation
       - internalMutation
       - internalQuery
+      - scheduler
+      - audit_events
     summary: >
       Convex schema with defineSchema/defineTable, v.id() for foreign keys,
       indexes for all query patterns, queries/mutations/actions separation,
       internal functions for service-to-service calls, real-time by default.
+      Audit lifecycle: pending → fetching → analyzing → evaluating → complete/failed.
+      Mutations schedule actions via ctx.scheduler.runAfter.
     path: docs/doctrine/architecture/db/database-doctrine.md
     specialist: db-architect
 
@@ -48,10 +52,17 @@ doctrines:
       - validation
       - audit service
       - orchestration
+      - ingestion
+      - sanitize
+      - rate limit
+      - FMEA
+      - budget
     summary: >
       Convex Actions for external API calls (GitHub REST, Anthropic Messages API),
       structured result returns ({ success, data } | { success, error }), Zod validation
-      on all external responses, clients never throw exceptions.
+      on all external responses, clients never throw exceptions. FMEA mitigations:
+      action wall-clock budget, normalizeGitHubError, post-Zod sanitization layer.
+      Unified startAuditAction handles ingest + analyze + evaluate.
     path: docs/doctrine/architecture/server/server-doctrine.md
     specialist: server-architect
 
@@ -66,12 +77,17 @@ doctrines:
       - pure function
       - invariant
       - validation
-      - hydration
-      - toProps
-      - fromProjection
+      - domain
+      - evaluator
+      - fileFilter
+      - tokenEstimator
+      - parseGitHubUrl
+      - sanitize
     summary: >
-      Entities with private readonly + getters + toProps(), factories validate invariants
-      and return Result<T, HydrationError>, tagged union errors with _tag discriminant.
+      Lightweight domain layer in src/domain/audit/ for shared pure functions
+      (URL parsing, file filtering, token estimation, safety scoring, sanitization).
+      No DDD entities/factories — Convex schema is source of truth for types.
+      Extract to domain when shared, complex, or safety-critical.
     path: docs/doctrine/architecture/domain/domain-doctrine.md
     specialist: domain-architect
 
@@ -81,18 +97,20 @@ doctrines:
       - component
       - hook
       - UI
-      - container
       - skeleton
       - React
       - useQuery
       - useMutation
-      - repository
-      - queryKeys
       - realtime
       - subscription
+      - mapper
+      - view model
+      - AgentFeed
+      - VulnerabilitiesPanel
     summary: >
-      Container/UI/Skeleton pattern, useDependencies() for DI, queryKeys factory,
-      repositories return Result<T, DomainError>, hydration via Factory.fromProps().
+      Flat component structure, Convex useQuery/useMutation for real-time state,
+      mapper functions (Doc → view model) in src/frontend/lib/, derived state via
+      useMemo, conditional queries with 'skip', create+schedule mutation pattern.
     path: docs/doctrine/architecture/frontend/frontend-doctrine.md
     specialist: frontend-architect
 

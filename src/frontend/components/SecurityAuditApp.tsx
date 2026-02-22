@@ -12,7 +12,7 @@ import {
   Play,
   X,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { calculateSafetyProbability } from '@/src/domain/audit/evaluator';
 import { parseGitHubUrl } from '@/src/domain/audit/parseGitHubUrl';
@@ -22,6 +22,8 @@ import type {
   SeverityFilter,
   Vulnerability,
 } from '@/src/frontend/types';
+
+import Link from 'next/link';
 
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
@@ -34,9 +36,13 @@ import { DeploymentSafetyChart } from './DeploymentSafetyChart';
 import { VulnerabilitiesPanel } from './VulnerabilitiesPanel';
 import { VulnerabilityModal } from './VulnerabilityModal';
 
-export default function SecurityAuditApp() {
+export default function SecurityAuditApp({
+  initialUrl,
+}: {
+  initialUrl?: string;
+}) {
   // User input
-  const [repoUrl, setRepoUrl] = useState('');
+  const [repoUrl, setRepoUrl] = useState(initialUrl ?? '');
 
   // Current audit tracking
   const [currentAuditId, setCurrentAuditId] = useState<Id<'audits'> | null>(
@@ -138,6 +144,16 @@ export default function SecurityAuditApp() {
     }
   };
 
+  // Auto-start audit when navigated from landing page with URL param
+  const hasAutoStarted = useRef(false);
+  useEffect(() => {
+    if (initialUrl && !hasAutoStarted.current) {
+      hasAutoStarted.current = true;
+      handleStartAudit();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handlePointClick = (hash: string) => {
     if (hash === selectedCommitHash) {
       setSelectedCommitHash(null);
@@ -150,16 +166,16 @@ export default function SecurityAuditApp() {
     <div className="flex h-screen flex-col overflow-hidden bg-[#0B0F14] font-sans text-[#E6EEF8]">
       {/* Top Bar */}
       <header className="z-10 flex h-16 shrink-0 items-center justify-between border-b border-[#1C2430] bg-[#0B0F14] px-6">
-        <div className="flex items-center gap-3">
+        <Link href="/" className="flex items-center gap-3">
           <img
-            src="https://res.cloudinary.com/dk9mn4cvz/image/upload/v1771717020/Roastybara-Logo_gecgsa.png"
+            src="/roastybara-logo.png"
             alt="Roastybara"
             className="h-9 w-9 rotate-3 transform rounded-xl shadow-lg shadow-blue-500/20 transition-transform hover:rotate-6"
           />
           <h1 className="font-display text-xl font-bold tracking-tight text-[#E6EEF8]">
             Roastybara
           </h1>
-        </div>
+        </Link>
 
         <div className="mx-8 max-w-2xl flex-1">
           <div className="group relative">

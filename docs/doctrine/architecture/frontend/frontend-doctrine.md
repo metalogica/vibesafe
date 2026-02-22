@@ -1,6 +1,6 @@
 # Frontend Doctrine (Next.js + React + Convex)
 
-**Version**: 1.1.0
+**Version**: 1.2.0
 **Status**: Binding
 **Date**: 2026-02-21
 **App**: Vibesafe
@@ -26,7 +26,7 @@ Keywords MUST, MUST NOT, SHOULD, MAY follow RFC 2119.
 | Icons | Lucide React |
 | Charts | Recharts |
 | Animation | Motion (v12+, imported as `motion/react`) |
-| Backend (planned) | Convex (real-time) |
+| Backend | Convex (real-time subscriptions) |
 
 ---
 
@@ -36,23 +36,24 @@ Keywords MUST, MUST NOT, SHOULD, MAY follow RFC 2119.
 app/                             # Next.js App Router
 ├── layout.tsx                   # Root layout (fonts, metadata)
 ├── globals.css                  # Tailwind imports + theme tokens
-└── page.tsx                     # Home page (renders SecurityAuditApp)
+├── page.tsx                     # Landing page (renders LandingPage)
+└── roast/
+    └── page.tsx                 # Audit dashboard (renders SecurityAuditApp, reads ?url= param)
 
 src/frontend/                    # All React frontend code
 ├── components/                  # UI components
-│   ├── SecurityAuditApp.tsx     # Main orchestrating component
-│   ├── AgentFeed.tsx            # Agent activity feed
+│   ├── LandingPage.tsx          # Marketing landing page with CTA → /roast
+│   ├── SecurityAuditApp.tsx     # Main orchestrating component (Convex subscriptions)
+│   ├── AgentFeed.tsx            # Agent activity feed (ingestion/security/evaluator)
 │   ├── DeploymentSafetyChart.tsx
 │   ├── VulnerabilitiesPanel.tsx
 │   └── VulnerabilityModal.tsx
 │
-├── data/                        # Mock data (until Convex integration)
-│   └── mockAuditData.ts
+├── lib/                         # Utilities + mappers
+│   ├── cn.ts                    # clsx + tailwind-merge
+│   └── auditMappers.ts         # Convex Doc → frontend view model mappers
 │
-├── lib/                         # Utilities
-│   └── cn.ts                    # clsx + tailwind-merge
-│
-└── types.ts                     # Shared TypeScript types
+└── types.ts                     # Shared frontend TypeScript types
 ```
 
 Flat structure. No feature folders, no DI, no repositories. Extract when complexity demands it.
@@ -82,10 +83,22 @@ Page components in `app/` are server components by default. They import and rend
 
 ```typescript
 // app/page.tsx — Server component (no 'use client')
-import SecurityAuditApp from '@/src/frontend/components/SecurityAuditApp';
+import { LandingPage } from '@/src/frontend/components/LandingPage';
 
 export default function Home() {
-  return <SecurityAuditApp />;
+  return <LandingPage />;
+}
+
+// app/roast/page.tsx — Server component with searchParams
+import SecurityAuditApp from '@/src/frontend/components/SecurityAuditApp';
+
+export default async function RoastPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ url?: string }>;
+}) {
+  const { url } = await searchParams;
+  return <SecurityAuditApp initialUrl={url} />;
 }
 ```
 
@@ -96,16 +109,14 @@ The `@/*` alias maps to the project root. All imports from `src/frontend/` use:
 ```typescript
 import { cn } from '@/src/frontend/lib/cn';
 import type { Vulnerability } from '@/src/frontend/types';
-import { INITIAL_VULNERABILITIES } from '@/src/frontend/data/mockAuditData';
+import { mapAnalysisToVulnerability } from '@/src/frontend/lib/auditMappers';
 ```
 
 Relative imports are used only within the same directory level (e.g., `./AgentFeed`).
 
 ---
 
-## 5. Convex Integration (Planned)
-
-Convex is not yet integrated. When added, follow these patterns:
+## 5. Convex Integration
 
 ### 5.1 Provider Setup
 
@@ -161,56 +172,75 @@ function AnalysisFeed({ auditId }: { auditId: Id<'audits'> }) {
 }
 ```
 
-### 5.3 Mutations
+### 5.3 Conditional Queries with `'skip'`
+
+Skip queries when the required argument is not yet available:
 
 ```typescript
-'use client';
+const [currentAuditId, setCurrentAuditId] = useState<Id<'audits'> | null>(null);
 
-import { useMutation } from 'convex/react';
-import { api } from '@/convex/_generated/api';
+// Only subscribe when we have an audit ID
+const audit = useQuery(api.audits.get, currentAuditId ? { auditId: currentAuditId } : 'skip');
+const events = useQuery(api.auditEvents.listByAudit, currentAuditId ? { auditId: currentAuditId } : 'skip');
+const analyses = useQuery(api.analyses.listByAudit, currentAuditId ? { auditId: currentAuditId } : 'skip');
+```
 
-function StartAuditButton({ repoUrl }: { repoUrl: string }) {
-  const createAudit = useMutation(api.audits.create);
+### 5.4 Mapper Pattern (Convex Doc → View Model)
 
-  const handleClick = async () => {
-    const auditId = await createAudit({ repoUrl, commitHash: 'HEAD' });
-    // Navigate or update UI
+Convex `Doc<'table'>` types contain backend fields (`_id`, `_creationTime`, backend enum values). Frontend components use view model types. Mappers bridge the two:
+
+```typescript
+// src/frontend/lib/auditMappers.ts
+import type { Doc } from '../../../convex/_generated/dataModel';
+import type { Vulnerability } from '../types';
+
+export function mapAnalysisToVulnerability(analysis: Doc<'audit_analyses'>): Vulnerability {
+  return {
+    id: analysis.displayId,
+    title: analysis.title,
+    file: analysis.filePath ?? '(architectural)',
+    severity: analysis.level,
+    category: analysis.category,
+    description: analysis.description,
+    impact: analysis.impact ?? '',
+    fix: analysis.fix ?? '',
   };
-
-  return <Button onClick={handleClick}>Start Audit</Button>;
 }
 ```
 
-### 5.4 Actions (External APIs)
+MUST use mappers when Convex types and view model types diverge. MUST test mappers with contract tests (see Section 11).
+```
+
+### 5.5 Mutations (Create + Schedule Pattern)
+
+The preferred pattern is a mutation that creates a record and schedules a backend action. The frontend calls the mutation and tracks the audit ID for subscriptions:
 
 ```typescript
 'use client';
 
 import { useState } from 'react';
-import { useAction } from 'convex/react';
+import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 
-function RunAnalysisButton({ auditId }: { auditId: Id<'audits'> }) {
-  const runAnalysis = useAction(api.services.auditService.runAnalysis);
-  const [isRunning, setIsRunning] = useState(false);
+function SecurityAuditApp() {
+  const [currentAuditId, setCurrentAuditId] = useState<Id<'audits'> | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const createAndStart = useMutation(api.audits.createAndStart);
 
-  const handleClick = async () => {
-    setIsRunning(true);
-    const result = await runAnalysis({ auditId });
-    if (!result.success) {
-      toast.error(result.error.message);
+  const handleStartAudit = async () => {
+    setError(null);
+    try {
+      const result = await createAndStart({ repoUrl });
+      setCurrentAuditId(result.auditId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start audit');
     }
-    setIsRunning(false);
   };
-
-  return (
-    <Button onClick={handleClick} disabled={isRunning}>
-      {isRunning ? 'Analyzing...' : 'Run Analysis'}
-    </Button>
-  );
 }
 ```
+
+MUST NOT call actions directly from the frontend for the audit flow. Use mutations that schedule actions via `ctx.scheduler.runAfter`.
 
 ---
 
@@ -319,7 +349,7 @@ Mobile-first. Use `sm:`, `md:`, `lg:` prefixes for larger screens.
 
 ## 8. State Management
 
-### 8.1 Server State (Post-Convex)
+### 8.1 Server State
 
 Convex handles all server state. MUST NOT duplicate in React state.
 
@@ -341,17 +371,35 @@ Local UI state (modals, tabs, form inputs) uses `useState`:
 ```typescript
 const [activeTab, setActiveTab] = useState<'all' | 'critical'>('all');
 const [repoUrl, setRepoUrl] = useState('');
+const [currentAuditId, setCurrentAuditId] = useState<Id<'audits'> | null>(null);
 ```
 
-### 8.3 Mock State (Pre-Convex)
+### 8.3 Derived State
 
-Until Convex is integrated, mock data lives in `src/frontend/data/` and state is managed via `useState` + `useRef` in the orchestrating component. This will be replaced by Convex queries/subscriptions.
+Use `useMemo` to derive view model data from Convex subscriptions:
+
+```typescript
+// Map Convex docs to view model types
+const vulnerabilities = useMemo(
+  () => (analyses ?? []).map(mapAnalysisToVulnerability),
+  [analyses],
+);
+
+// Compute running metrics from real-time data
+const currentConsensus = useMemo(() => {
+  if (evaluation) return evaluation.probability;
+  if (!analyses || analyses.length === 0) return 100;
+  return calculateSafetyProbability(analyses);
+}, [analyses, evaluation]);
+```
+
+MUST use `useMemo` for any non-trivial transformation of Convex subscription data.
 
 ---
 
 ## 9. Error Handling
 
-### 9.1 Query Errors (Post-Convex)
+### 9.1 Query Errors
 
 Convex queries don't throw by default. Handle missing data:
 
@@ -427,28 +475,18 @@ vi.spyOn(convexReact, 'useQuery').mockReturnValue([
 
 ## 12. Performance
 
-### 12.1 Query Granularity (Post-Convex)
+### 12.1 Query Granularity
 
 Prefer multiple small queries over one large query:
 
 ```typescript
 // ✓ GOOD: components subscribe to what they need
-const audit = useQuery(api.audits.get, { auditId });
-const analyses = useQuery(api.analyses.listByAudit, { auditId });
+const audit = useQuery(api.audits.get, currentAuditId ? { auditId: currentAuditId } : 'skip');
+const analyses = useQuery(api.analyses.listByAudit, currentAuditId ? { auditId: currentAuditId } : 'skip');
+const events = useQuery(api.auditEvents.listByAudit, currentAuditId ? { auditId: currentAuditId } : 'skip');
 
 // ✗ AVOID: one mega-query that returns everything
 const everything = useQuery(api.audits.getWithAllRelations, { auditId });
-```
-
-### 12.2 Conditional Queries
-
-Skip queries when data isn't needed:
-
-```typescript
-const evaluation = useQuery(
-  api.evaluations.getByAudit,
-  audit?.status === 'complete' ? { auditId } : 'skip',
-);
 ```
 
 ---
@@ -461,7 +499,7 @@ If Vibesafe grows:
 2. **Shared component library** → Extract to `src/frontend/components/ui/` with Storybook
 3. **Complex forms** → Add React Hook Form + Zod
 4. **Global UI state** → Add Zustand for modals, toasts, sidebar
-5. **Convex integration** → Replace mock data with real-time subscriptions
+5. **More mapper files** → Extract to `src/frontend/lib/` as new Convex tables are added
 
 This is a refactor, not a rewrite.
 
@@ -472,4 +510,5 @@ This is a refactor, not a rewrite.
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0.0 | 2026-02-21 | Initial minimal frontend doctrine for Vibesafe |
+| 1.2.0 | 2026-02-21 | Convex integration: removed mock data patterns, added mapper pattern (Doc → view model), conditional query skip, derived state with useMemo, create+schedule mutation pattern, contract test guidance |
 | 1.1.0 | 2026-02-21 | Updated for Next.js 16 App Router: directory structure, path aliases, `'use client'` patterns, VibeSafe design tokens, mock state section |
