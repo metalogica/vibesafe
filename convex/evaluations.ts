@@ -7,6 +7,7 @@ export const create = internalMutation({
     auditId: v.id('audits'),
     probability: v.number(),
     executiveSummary: v.string(),
+    vulnerabilityCount: v.number(),
   },
   handler: async (ctx, args) => {
     return await ctx.db.insert('audit_evaluations', args);

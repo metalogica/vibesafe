@@ -1,18 +1,20 @@
 import { v } from 'convex/values';
 
+import { internal } from './_generated/api';
 import {
   internalMutation,
   internalQuery,
   mutation,
   query,
 } from './_generated/server';
+import { parseGitHubUrl } from '../src/domain/audit/parseGitHubUrl';
 
 export const create = mutation({
   args: {
     repoUrl: v.string(),
     repoOwner: v.string(),
     repoName: v.string(),
-    commitHash: v.string(),
+    commitHash: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
@@ -93,5 +95,53 @@ export const updateIngestStats = internalMutation({
   },
   handler: async (ctx, { auditId, commitHash, truncated, stats }) => {
     await ctx.db.patch(auditId, { commitHash, truncated, stats });
+  },
+});
+
+export const createAndStart = mutation({
+  args: { repoUrl: v.string() },
+  handler: async (ctx, { repoUrl }) => {
+    const parsed = parseGitHubUrl(repoUrl);
+    if (!parsed) {
+      throw new Error('INVALID_URL');
+    }
+
+    const normalizedUrl = `https://github.com/${parsed.owner}/${parsed.repo}`;
+
+    const auditId = await ctx.db.insert('audits', {
+      repoUrl: normalizedUrl,
+      repoOwner: parsed.owner,
+      repoName: parsed.repo,
+      status: 'pending',
+    });
+
+    await ctx.scheduler.runAfter(0, internal.services.startAuditAction.startAudit, {
+      auditId,
+      owner: parsed.owner,
+      repo: parsed.repo,
+    });
+
+    return { auditId, repoUrl: normalizedUrl };
+  },
+});
+
+export const listByRepoWithEvaluation = query({
+  args: { repoUrl: v.string() },
+  handler: async (ctx, { repoUrl }) => {
+    const audits = await ctx.db
+      .query('audits')
+      .withIndex('by_url', (q) => q.eq('repoUrl', repoUrl))
+      .order('desc')
+      .collect();
+
+    return await Promise.all(
+      audits.map(async (audit) => {
+        const evaluation = await ctx.db
+          .query('audit_evaluations')
+          .withIndex('by_audit', (q) => q.eq('auditId', audit._id))
+          .first();
+        return { ...audit, evaluation };
+      }),
+    );
   },
 });

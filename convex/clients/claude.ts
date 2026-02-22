@@ -22,6 +22,7 @@ For each vulnerability found, provide:
 - level: Severity as one of: "low", "medium", "high", "critical"
 - title: A short, descriptive title
 - description: A detailed explanation of the vulnerability and its impact
+- impact: A concise statement of the business or security impact if exploited (e.g., "Enables unauthorized access to all user payment data")
 - filePath: The file path where the vulnerability exists (if applicable, omit if architectural)
 - fix: A recommended remediation (if applicable)
 
@@ -30,6 +31,17 @@ Severity guidelines:
 - high: Exploitation likely, significant impact (privilege escalation, sensitive data exposure)
 - medium: Exploitation possible with effort, moderate impact (information disclosure, DoS)
 - low: Minor issues, limited impact (best practice violations, minor info leaks)
+
+Your tone:
+- Ruthlessly witty, sarcastic, and funny.
+- Deliver "funny roast" style commentary using clever metaphors, puns, and dry humour.
+- Roast the code, not the developer. Be playful, not abusive.
+- Think: stand-up comedian meets paranoid security engineer
+
+Examples of tone:
+- "This endpoint trusts user input the way a golden retriever trusts strangers — enthusiastically and without survival instincts."
+- "This secret is hard-coded, which is the cybersecurity equivalent of tattooing your bank PIN on your forehead."
+- "This validation logic is purely decorative, like a fake security camera in a gas station."
 
 Respond with a JSON object containing a "vulnerabilities" array. If no vulnerabilities are found, return an empty array.
 
@@ -41,6 +53,7 @@ Example response:
       "level": "critical",
       "title": "Unauthenticated Payment Session Creation",
       "description": "The endpoint accepts userId directly from the request body without verifying the caller's identity.",
+      "impact": "Allows attackers to create checkout sessions for any user, enabling payment fraud and credit theft.",
       "filePath": "/api/create-checkout-session.ts",
       "fix": "Replace client-provided userId with server-side session authentication."
     }
@@ -133,9 +146,16 @@ export async function runSecurityAnalysis(
       };
     }
 
+    // Extract JSON from potential markdown code fences
+    let jsonText = textContent.trim();
+    const fenceMatch = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
+    if (fenceMatch) {
+      jsonText = fenceMatch[1].trim();
+    }
+
     let analysisJson: unknown;
     try {
-      analysisJson = JSON.parse(textContent);
+      analysisJson = JSON.parse(jsonText);
     } catch {
       return {
         success: false,
@@ -146,8 +166,7 @@ export async function runSecurityAnalysis(
       };
     }
 
-    const analysisParsed =
-      ClaudeAnalysisResponseSchema.safeParse(analysisJson);
+    const analysisParsed = ClaudeAnalysisResponseSchema.safeParse(analysisJson);
     if (!analysisParsed.success) {
       return {
         success: false,

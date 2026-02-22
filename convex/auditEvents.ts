@@ -6,6 +6,7 @@ export const create = internalMutation({
   args: {
     auditId: v.id('audits'),
     agent: v.union(
+      v.literal('INGESTION'),
       v.literal('SECURITY_ANALYST'),
       v.literal('EVALUATOR'),
     ),

@@ -1,10 +1,9 @@
-export type AgentRole = 'retriever' | 'security' | 'evaluator';
+export type AgentRole = 'ingestion' | 'security' | 'evaluator';
 
 export interface AgentMessage {
   id: string;
   agent: AgentRole;
   text: string;
-  belief?: number;
   timestamp: number;
 }
 
@@ -32,9 +31,8 @@ export interface Vulnerability {
   title: string;
   file: string;
   severity: Severity;
+  category: string;
   description: string;
   impact: string;
   fix: string;
-  status: 'open' | 'fixed';
-  commitDetected: string;
 }

@@ -21,7 +21,7 @@ const syne = Syne({
 });
 
 export const metadata: Metadata = {
-  title: 'VibeSafe',
+  title: 'Roastybara',
   description: 'AI-powered security audits for codebases',
 };
 

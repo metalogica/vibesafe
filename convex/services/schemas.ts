@@ -5,6 +5,7 @@ export const VulnerabilitySchema = z.object({
   level: z.enum(['low', 'medium', 'high', 'critical']),
   title: z.string(),
   description: z.string(),
+  impact: z.string().optional(),
   filePath: z.string().optional(),
   fix: z.string().optional(),
 });

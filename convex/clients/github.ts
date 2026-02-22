@@ -1,3 +1,5 @@
+import { normalizeGitHubError } from '../../src/domain/audit/normalizeGitHubError';
+
 const GITHUB_API_BASE = 'https://api.github.com';
 
 export interface GitHubTreeEntry {
@@ -46,43 +48,11 @@ export async function fetchRepoTree(
     );
 
     if (!response.ok) {
-      if (response.status === 404) {
-        return {
-          success: false,
-          error: { code: 'NOT_FOUND', message: 'Repository not found' },
-        };
-      }
-      if (response.status === 403) {
-        const rateLimitRemaining =
-          response.headers.get('X-RateLimit-Remaining');
-        if (rateLimitRemaining === '0') {
-          const resetTime = response.headers.get('X-RateLimit-Reset');
-          const minutes = resetTime
-            ? Math.ceil((Number(resetTime) * 1000 - Date.now()) / 60000)
-            : 0;
-          return {
-            success: false,
-            error: {
-              code: 'RATE_LIMIT',
-              message: `GitHub rate limit hit. Try again in ${minutes} minutes.`,
-            },
-          };
-        }
-        return {
-          success: false,
-          error: {
-            code: 'PRIVATE_REPO',
-            message: 'Repository is private or inaccessible',
-          },
-        };
-      }
-      return {
-        success: false,
-        error: {
-          code: 'GITHUB_ERROR',
-          message: `GitHub API error: ${response.status}`,
-        },
-      };
+      const errorInfo = normalizeGitHubError(response.status, {
+        rateLimitRemaining: response.headers.get('X-RateLimit-Remaining'),
+        rateLimitReset: response.headers.get('X-RateLimit-Reset'),
+      });
+      return { success: false, error: errorInfo };
     }
 
     const data = (await response.json()) as GitHubTreeResponse;
@@ -110,13 +80,11 @@ export async function fetchBlob(
     );
 
     if (!response.ok) {
-      return {
-        success: false,
-        error: {
-          code: 'GITHUB_ERROR',
-          message: `GitHub API error: ${response.status}`,
-        },
-      };
+      const errorInfo = normalizeGitHubError(response.status, {
+        rateLimitRemaining: response.headers.get('X-RateLimit-Remaining'),
+        rateLimitReset: response.headers.get('X-RateLimit-Reset'),
+      });
+      return { success: false, error: errorInfo };
     }
 
     const data = (await response.json()) as GitHubBlobResponse;

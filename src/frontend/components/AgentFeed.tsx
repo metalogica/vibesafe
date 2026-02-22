@@ -14,7 +14,7 @@ interface AgentFeedProps {
 
 function getAgentIcon(agent: string) {
   switch (agent) {
-    case 'retriever':
+    case 'ingestion':
       return <FileSearch className="h-4 w-4" />;
     case 'security':
       return <ShieldAlert className="h-4 w-4" />;
@@ -27,7 +27,7 @@ function getAgentIcon(agent: string) {
 
 function getAgentColorStyles(agent: string) {
   switch (agent) {
-    case 'retriever':
+    case 'ingestion':
       return 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400';
     case 'security':
       return 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400';
@@ -40,8 +40,8 @@ function getAgentColorStyles(agent: string) {
 
 function getAgentName(agent: string) {
   switch (agent) {
-    case 'retriever':
-      return 'Retriever';
+    case 'ingestion':
+      return 'Ingestion';
     case 'security':
       return 'Security Analyst';
     case 'evaluator':
@@ -53,7 +53,7 @@ function getAgentName(agent: string) {
 
 function getAgentTextColor(agent: string) {
   switch (agent) {
-    case 'retriever':
+    case 'ingestion':
       return 'text-indigo-400';
     case 'security':
       return 'text-emerald-400';
