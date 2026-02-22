@@ -1,6 +1,6 @@
 # Services Doctrine (Convex Actions + External APIs)
 
-**Version**: 1.1.0
+**Version**: 1.2.0
 **Status**: Binding
 **Date**: 2026-02-21
 **App**: Vibesafe
@@ -23,16 +23,21 @@ Keywords MUST, MUST NOT, SHOULD, MAY follow RFC 2119.
 +---------------------------------------------------------------+
 |                                                               |
 |  +-------------------------------------------------------+   |
-|  |                   Audit Service                        |   |
-|  |            (orchestrates the audit flow)               |   |
-|  +---------------------+--------------------------------+   |
-|                         |                                     |
-|         +---------------+---------------+                     |
-|         v                               v                     |
-|  +--------------+              +--------------+               |
-|  |   GitHub     |              |   Claude     |               |
-|  |   Client     |              |   Client     |               |
-|  +--------------+              +--------------+               |
+|  |               startAuditAction                        |   |
+|  |   (unified: ingest + analyze + evaluate)              |   |
+|  +-----+----------------------------+-------------------+   |
+|        |                            |                         |
+|        v                            v                         |
+|  +--------------+           +--------------+                  |
+|  |   GitHub     |           |   Claude     |                  |
+|  |   Client     |           |   Client     |                  |
+|  +--------------+           +--------------+                  |
+|        |                            |                         |
+|        v                            v                         |
+|  +---------------------------------------------+             |
+|  |           src/domain/audit/                  |             |
+|  |   Pure functions (filter, sanitize, score)   |             |
+|  +---------------------------------------------+             |
 |                                                               |
 +---------------------------------------------------------------+
 ```
@@ -44,14 +49,23 @@ Keywords MUST, MUST NOT, SHOULD, MAY follow RFC 2119.
 ```
 convex/
 ├── services/
-│   ├── auditService.ts      # Orchestration action
+│   ├── startAuditAction.ts  # Unified ingest + analyze + evaluate action
+│   ├── auditService.ts      # Legacy analysis-only action
 │   └── schemas.ts           # Zod schemas for external responses
 │
 ├── clients/
-│   ├── github.ts            # GitHub REST API client
+│   ├── github.ts            # GitHub REST API client (uses normalizeGitHubError)
 │   └── claude.ts            # Anthropic Messages API client
 │
 └── _generated/
+
+src/domain/audit/                  # Pure functions used by actions
+├── fileFilter.ts                  # Ingestion file inclusion rules
+├── tokenEstimator.ts              # Token budget + file priority
+├── evaluator.ts                   # Safety scoring + display formatting
+├── actionBudget.ts                # Wall-clock budget guard
+├── normalizeGitHubError.ts        # GitHub error classification
+└── sanitizeVulnerabilities.ts     # Post-Zod sanitization
 ```
 
 ---
@@ -109,6 +123,8 @@ function getHeaders(): Record<string, string> {
   return headers;
 }
 
+import { normalizeGitHubError } from "../../src/domain/audit/normalizeGitHubError";
+
 export async function fetchRepoTree(
   owner: string,
   repo: string,
@@ -121,43 +137,12 @@ export async function fetchRepoTree(
     );
 
     if (!response.ok) {
-      if (response.status === 404) {
-        return {
-          success: false,
-          error: { code: "NOT_FOUND", message: "Repository not found" },
-        };
-      }
-      if (response.status === 403) {
-        const rateLimitRemaining =
-          response.headers.get("X-RateLimit-Remaining");
-        if (rateLimitRemaining === "0") {
-          const resetTime = response.headers.get("X-RateLimit-Reset");
-          const minutes = resetTime
-            ? Math.ceil((Number(resetTime) * 1000 - Date.now()) / 60000)
-            : 0;
-          return {
-            success: false,
-            error: {
-              code: "RATE_LIMIT",
-              message: `GitHub rate limit hit. Try again in ${minutes} minutes.`,
-            },
-          };
-        }
-        return {
-          success: false,
-          error: {
-            code: "PRIVATE_REPO",
-            message: "Repository is private or inaccessible",
-          },
-        };
-      }
-      return {
-        success: false,
-        error: {
-          code: "GITHUB_ERROR",
-          message: `GitHub API error: ${response.status}`,
-        },
-      };
+      // Centralised error classification (handles 404, 429, 403+exhausted, 403+private)
+      const errorInfo = normalizeGitHubError(response.status, {
+        rateLimitRemaining: response.headers.get("X-RateLimit-Remaining"),
+        rateLimitReset: response.headers.get("X-RateLimit-Reset"),
+      });
+      return { success: false, error: errorInfo };
     }
 
     const data = (await response.json()) as GitHubTreeResponse;
@@ -185,13 +170,13 @@ export async function fetchBlob(
     );
 
     if (!response.ok) {
-      return {
-        success: false,
-        error: {
-          code: "GITHUB_ERROR",
-          message: `GitHub API error: ${response.status}`,
-        },
-      };
+      // CRITICAL: must use normalizeGitHubError here too — otherwise rate limits
+      // during blob fetching are classified as GITHUB_ERROR and silently skipped
+      const errorInfo = normalizeGitHubError(response.status, {
+        rateLimitRemaining: response.headers.get("X-RateLimit-Remaining"),
+        rateLimitReset: response.headers.get("X-RateLimit-Reset"),
+      });
+      return { success: false, error: errorInfo };
     }
 
     const data = (await response.json()) as GitHubBlobResponse;
@@ -353,6 +338,7 @@ export const VulnerabilitySchema = z.object({
   level: z.enum(["low", "medium", "high", "critical"]),
   title: z.string(),
   description: z.string(),
+  impact: z.string().optional(),
   filePath: z.string().optional(),
   fix: z.string().optional(),
 });
@@ -368,92 +354,53 @@ MUST validate all external API responses with Zod before using.
 
 ---
 
-## 6. Audit Service (Orchestration)
+## 6. Unified Audit Action (Orchestration)
+
+The `startAuditAction` is the primary entry point. It combines ingestion, analysis, and evaluation in a single action with three FMEA mitigations:
 
 ```typescript
-// convex/services/auditService.ts
+// convex/services/startAuditAction.ts
 
-import { v } from "convex/values";
-import { action } from "../_generated/server";
+import { internalAction } from "../_generated/server";
 import { internal } from "../_generated/api";
-import { runSecurityAnalysis } from "../clients/claude";
+import { isOverBudget, MAX_BLOB_FETCHES } from "../../src/domain/audit/actionBudget";
+import { shouldIncludeFile } from "../../src/domain/audit/fileFilter";
+import { sanitizeVulnerabilities } from "../../src/domain/audit/sanitizeVulnerabilities";
+import { calculateSafetyProbability, generateExecutiveSummary } from "../../src/domain/audit/evaluator";
 
-type AuditResult =
-  | { success: true; data: { vulnerabilityCount: number; probability: number } }
-  | { success: false; error: { code: string; message: string } };
+export const startAudit = internalAction({
+  args: { auditId: v.id("audits"), owner: v.string(), repo: v.string() },
+  handler: async (ctx, { auditId, owner, repo }) => {
+    const actionStart = Date.now(); // FMEA #1: wall-clock budget
 
-export const runAudit = action({
-  args: {
-    auditId: v.id("audits"),
-    files: v.array(v.object({ path: v.string(), content: v.string() })),
-  },
-  handler: async (ctx, { auditId, files }): Promise<AuditResult> => {
-    // 1. Update status to analyzing
-    await ctx.runMutation(internal.audits.updateStatus, {
-      auditId, status: "analyzing",
-    });
+    // FMEA #1: try/catch guarantees terminal state (complete or failed)
+    try {
+      // === INGESTION: fetch tree, filter files, fetch blobs ===
+      // Triple-bounded: wall-clock, file cap (MAX_BLOB_FETCHES), token budget
+      // FMEA #2: blob loop propagates RATE_LIMIT errors instead of skipping
 
-    // 2. Call Claude for security analysis
-    const analysisResult = await runSecurityAnalysis(files);
-    if (!analysisResult.success) {
-      await ctx.runMutation(internal.audits.fail, {
-        auditId, error: analysisResult.error.message,
-      });
-      return { success: false, error: analysisResult.error };
+      // === ANALYSIS: call Claude, Zod-validate response ===
+      // FMEA #3: sanitizeVulnerabilities() post-Zod (clamp lengths, enforce enums, cap count)
+
+      // === EVALUATION: score + summary ===
+      // Pure functions from src/domain/audit/evaluator.ts
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unexpected internal error";
+      await ctx.runMutation(internal.audits.fail, { auditId, error: message });
     }
-
-    const vulnerabilities = analysisResult.data.vulnerabilities;
-
-    // 3. Store each vulnerability + create feed event
-    for (let i = 0; i < vulnerabilities.length; i++) {
-      const vuln = vulnerabilities[i];
-      const seqNumber = i + 1;
-      const displayId = generateDisplayId(auditId, seqNumber);
-
-      const analysisId = await ctx.runMutation(internal.analyses.create, {
-        auditId, seqNumber, displayId,
-        category: vuln.category, level: vuln.level,
-        title: vuln.title, description: vuln.description,
-        filePath: vuln.filePath, fix: vuln.fix,
-      });
-
-      await ctx.runMutation(internal.auditEvents.create, {
-        auditId, agent: "SECURITY_ANALYST",
-        message: generateAnalystMessage(vuln, displayId),
-        analysisId,
-      });
-    }
-
-    // 4. Evaluate + complete
-    await ctx.runMutation(internal.audits.updateStatus, {
-      auditId, status: "evaluating",
-    });
-
-    const probability = calculateSafetyProbability(vulnerabilities);
-    const executiveSummary = generateExecutiveSummary(vulnerabilities);
-
-    await ctx.runMutation(internal.evaluations.create, {
-      auditId, probability, executiveSummary,
-    });
-
-    await ctx.runMutation(internal.auditEvents.create, {
-      auditId, agent: "EVALUATOR", message: executiveSummary,
-    });
-
-    await ctx.runMutation(internal.audits.updateStatus, {
-      auditId, status: "complete",
-    });
-
-    return {
-      success: true,
-      data: { vulnerabilityCount: vulnerabilities.length, probability },
-    };
   },
 });
-
-// Pure functions: calculateSafetyProbability, generateExecutiveSummary,
-// generateDisplayId, generateAnalystMessage — see implementation.
 ```
+
+### 6.1 FMEA Mitigations (Mandatory Patterns)
+
+| # | Risk | Mitigation | Implementation |
+|---|------|------------|----------------|
+| 1 | Action exceeds Convex 10-min limit | Wall-clock budget (`ACTION_BUDGET_MS = 540s`), file cap, try/catch envelope | `src/domain/audit/actionBudget.ts` |
+| 2 | GitHub rate limit classified as generic error | Centralised `normalizeGitHubError` used by both `fetchRepoTree` and `fetchBlob` | `src/domain/audit/normalizeGitHubError.ts` |
+| 3 | Claude returns valid JSON with bad semantics | Post-Zod sanitiser: clamp field lengths, enforce severity enum, cap at 50 vulns | `src/domain/audit/sanitizeVulnerabilities.ts` |
+
+These mitigations are MANDATORY for any new action that calls external APIs or processes untrusted input.
 
 ---
 
@@ -461,15 +408,15 @@ export const runAudit = action({
 
 | Code | Source | Meaning |
 |------|--------|---------|
-| `INVALID_URL` | GitHub | URL doesn't match github.com pattern |
+| `INVALID_URL` | URL parsing | URL doesn't match github.com pattern |
 | `NOT_FOUND` | GitHub/Convex | Entity doesn't exist |
-| `PRIVATE_REPO` | GitHub | 403 without rate limit headers |
-| `RATE_LIMIT` | GitHub/Claude | API quota exceeded |
+| `PRIVATE_REPO` | GitHub | 403 without rate limit exhaustion |
+| `RATE_LIMIT` | GitHub/Claude | API quota exceeded (429 or 403+exhausted) |
 | `GITHUB_ERROR` | GitHub | Other GitHub API error |
 | `CLAUDE_ERROR` | Claude | Anthropic API failure |
 | `INVALID_RESPONSE` | Claude | Response failed Zod validation |
 | `NETWORK_ERROR` | Any | Fetch failed |
-| `AGENT_ERROR` | Service | Analysis call failed |
+| `BUDGET_EXCEEDED` | Action | Wall-clock time or file cap exceeded |
 
 ---
 
@@ -493,8 +440,12 @@ MUST NOT commit secrets. MUST use Convex environment variables for server-side k
 - Clients MUST return structured results (`{ success, data } | { success, error }`)
 - Clients MUST NOT throw exceptions
 - Clients MUST validate external responses with Zod
+- Clients MUST use `normalizeGitHubError` for GitHub error classification (not inline logic)
+- Actions MUST wrap entire pipeline in try/catch to guarantee terminal state
+- Actions MUST check `isOverBudget()` at every loop iteration and phase boundary
+- Actions MUST apply `sanitizeVulnerabilities()` after Zod parse, before database insertion
+- Actions MUST propagate RATE_LIMIT errors immediately (not skip with `continue`)
 - Actions MUST update audit status on failure
-- Actions MUST handle partial success gracefully
 - SHOULD log errors server-side for debugging
 
 ---
@@ -564,11 +515,11 @@ test("runAudit completes successfully", async () => {
 
 If Vibesafe grows:
 
-1. **Retrvr integration** — Search for related CVEs/hacks per vulnerability (enrich `audit_analyses.links`)
-2. **Retry logic** — Add exponential backoff for transient failures
-3. **Queue system** — Use Convex scheduled functions for long-running audits
-4. **Streaming** — Stream analyses to frontend as they're generated
-5. **Caching** — Cache GitHub file contents to avoid re-fetching
+1. **CVE enrichment** — Search for related CVEs/hacks per vulnerability
+2. **Retry logic** — Add exponential backoff for transient GitHub/Claude failures
+3. **Chunked analysis** — Split large repos across multiple Claude calls
+4. **Caching** — Cache GitHub file contents to avoid re-fetching on re-audit
+5. **Fix verification** — Re-audit after fixes are applied, compare results
 
 ---
 
@@ -577,4 +528,5 @@ If Vibesafe grows:
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0.0 | 2026-02-21 | Initial services doctrine for Vibesafe |
+| 1.2.0 | 2026-02-21 | Unified startAuditAction (ingest+analyze+evaluate), FMEA mitigations (action budget, normalizeGitHubError, sanitizeVulnerabilities), domain pure function imports, impact field in Zod schema |
 | 1.1.0 | 2026-02-21 | Replace MinMax/Retrvr with Anthropic Claude API; update all client patterns, schemas, error codes, env vars, and test examples to match implementation |

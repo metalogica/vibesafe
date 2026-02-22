@@ -1,5 +1,5 @@
-# Vibesafe
-Vibesafe is a webapp that runs security audits on codebases to write bespoke security audits to assess if the application is safe for production deployment. You can try it here: <LINK>
+# Roastybara
+Roastybara is a webapp that runs security audits on codebases to write bespoke security audits to assess if the application is safe for production deployment. You can try it here: <LINK>
 
 ## Spec-Driven Development Guide
 This repository uses **Spec-Driven Development (SDD)**, a multi-agent workflow developed by [Rei Nova](https://rei.gg/) where humans write intent, AI architects generate specifications, and orchestrators execute them with verification at every step.

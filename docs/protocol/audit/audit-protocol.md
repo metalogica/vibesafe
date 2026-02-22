@@ -1,6 +1,12 @@
+**Version**: 1.1.0
+**Status**: Binding
+**Date**: 2026-02-21
+
 ## 1. Overview
 
-This protocol defines how Vibesafe analyzes ingested repositories for security vulnerabilities. A single MinMax agent call analyzes the codebase, produces structured vulnerability findings, and a deterministic evaluator scores the results.
+This protocol defines how Vibesafe analyzes ingested repositories for security vulnerabilities. A single Claude (Anthropic) API call analyzes the codebase, produces structured vulnerability findings, and a deterministic evaluator scores the results.
+
+**Note**: Analysis and evaluation run as phases 2-3 of the unified `startAuditAction`. Evaluator pure functions live in `src/domain/audit/evaluator.ts`. Post-Zod sanitization in `src/domain/audit/sanitizeVulnerabilities.ts`.
 
 ---
 
@@ -20,10 +26,18 @@ So that I understand what the system is finding.
 
 ## 3. Audit Flow
 
+This runs as phases 2-3 inside `startAuditAction`, after ingestion completes.
+
 ```
 ┌─────────────────┐
-│  Ingest         │
+│  Ingestion      │
 │  complete       │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Budget check   │──── Over budget ────► status = failed
+│  (FMEA #1)      │     "Audit timed out"
 └────────┬────────┘
          │
          ▼
@@ -34,8 +48,8 @@ So that I understand what the system is finding.
          │
          ▼
 ┌─────────────────┐
-│  Call MinMax    │──── Error ────► status = failed
-│  (single call)  │
+│  Call Claude    │──── Error ────► status = failed
+│  (single call)  │──── 429 ────► RATE_LIMIT
 └────────┬────────┘
          │ Success
          ▼
@@ -45,11 +59,17 @@ So that I understand what the system is finding.
 └────────┬────────┘
          │ Valid
          ▼
+┌─────────────────────┐
+│  Sanitize vulns     │  FMEA #3: clamp lengths, enforce enums,
+│  (post-Zod)         │  drop invalid, cap at 50
+└────────┬────────────┘
+         │
+         ▼
 ┌─────────────────┐
 │  For each vuln: │
-│  - Generate ID  │
-│  - Store record │
-│  - Create event │
+│  - Generate ID  │  generateDisplayId (from evaluator.ts)
+│  - Store record │  including impact field
+│  - Create event │  SECURITY_ANALYST agent event
 └────────┬────────┘
          │
          ▼
@@ -60,25 +80,25 @@ So that I understand what the system is finding.
          │
          ▼
 ┌─────────────────┐
-│  Calculate      │
+│  Calculate      │  calculateSafetyProbability (from evaluator.ts)
 │  probability    │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│  Generate       │
+│  Generate       │  generateExecutiveSummary (from evaluator.ts)
 │  summary        │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│  Store          │
+│  Store          │  including vulnerabilityCount
 │  evaluation     │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│  Create         │
+│  Create         │  EVALUATOR agent event
 │  evaluator event│
 └────────┬────────┘
          │
@@ -87,13 +107,16 @@ So that I understand what the system is finding.
 │  Update status  │
 │  = complete     │
 └─────────────────┘
+
+NOTE: Entire pipeline is wrapped in try/catch (FMEA #1).
+If anything throws, catch block calls audits.fail → guaranteed terminal state.
 ```
 
 ---
 
 ## 4. Data Model
 
-### 4.1 Schema Additions
+### 4.1 Schema
 
 ```typescript
 // convex/schema.ts
@@ -111,6 +134,7 @@ audit_analyses: defineTable({
   ),
   title: v.string(),
   description: v.string(),
+  impact: v.optional(v.string()),  // Business/security impact statement
   filePath: v.optional(v.string()),
   fix: v.optional(v.string()),
 }).index("by_audit", ["auditId"]),
@@ -119,11 +143,13 @@ audit_evaluations: defineTable({
   auditId: v.id("audits"),
   probability: v.number(),         // 0-100
   executiveSummary: v.string(),
+  vulnerabilityCount: v.number(),  // Avoids N+1 for chart data
 }).index("by_audit", ["auditId"]),
 
 audit_events: defineTable({
   auditId: v.id("audits"),
   agent: v.union(
+    v.literal("INGESTION"),        // Events during repo fetching
     v.literal("SECURITY_ANALYST"),
     v.literal("EVALUATOR")
   ),
@@ -151,31 +177,30 @@ function generateDisplayId(auditId: string, seqNumber: number): string {
 
 ---
 
-## 5. MinMax Integration
+## 5. Claude Integration
 
 ### 5.1 Request Format
 
+**File: `convex/clients/claude.ts`**
+
 ```typescript
-const response = await fetch(`${MINMAX_API_BASE}/v1/chat/completions`, {
+const response = await fetch("https://api.anthropic.com/v1/messages", {
   method: "POST",
   headers: {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${process.env.MINMAX_API_KEY}`,
+    "x-api-key": process.env.CLAUDE_CODE_API_KEY ?? "",
+    "anthropic-version": "2023-06-01",
   },
   body: JSON.stringify({
-    model: "minmax-security-1",  // Or appropriate model
+    model: "claude-sonnet-4-5-20250929",
+    max_tokens: 8192,
+    system: SECURITY_ANALYST_SYSTEM_PROMPT,
     messages: [
       {
-        role: "system",
-        content: SECURITY_ANALYST_SYSTEM_PROMPT,
-      },
-      {
         role: "user",
-        content: buildAnalysisPrompt(repoContents),
+        content: buildAnalysisPrompt(files),
       },
     ],
-    response_format: { type: "json_object" },
-    temperature: 0.1,  // Low temperature for consistency
   }),
 });
 ```
@@ -192,6 +217,7 @@ For each vulnerability found, provide:
 - level: Severity as one of: "low", "medium", "high", "critical"
 - title: A short, descriptive title (e.g., "Unauthenticated Payment Session Creation")
 - description: A detailed explanation of the vulnerability and its impact
+- impact: A concise statement of the business or security impact if exploited (e.g., "Enables unauthorized access to all user payment data")
 - filePath: The file path where the vulnerability exists (if applicable, omit if architectural)
 - fix: A recommended remediation (if applicable)
 
@@ -211,6 +237,7 @@ Example response:
       "level": "critical",
       "title": "Unauthenticated Payment Session Creation",
       "description": "The /api/create-checkout-session endpoint accepts userId directly from the request body without verifying the caller's identity.",
+      "impact": "Allows attackers to create checkout sessions for any user, enabling payment fraud and credit theft.",
       "filePath": "/api/create-checkout-session.ts",
       "fix": "Replace client-provided userId with server-side session authentication."
     }
@@ -234,7 +261,7 @@ Identify all security vulnerabilities and respond with JSON.`;
 }
 ```
 
-### 5.4 Response Validation
+### 5.4 Response Validation (Zod)
 
 ```typescript
 // convex/services/schemas.ts
@@ -246,34 +273,59 @@ export const VulnerabilitySchema = z.object({
   level: z.enum(["low", "medium", "high", "critical"]),
   title: z.string(),
   description: z.string(),
+  impact: z.string().optional(),       // NEW: business/security impact
   filePath: z.string().optional(),
   fix: z.string().optional(),
 });
 
-export const MinMaxResponseSchema = z.object({
+export const ClaudeAnalysisResponseSchema = z.object({
   vulnerabilities: z.array(VulnerabilitySchema),
 });
 
 export type Vulnerability = z.infer<typeof VulnerabilitySchema>;
 ```
 
+### 5.5 Post-Zod Sanitization (FMEA #3)
+
+**File: `src/domain/audit/sanitizeVulnerabilities.ts`**
+
+After Zod structural validation, apply sanitization before database insertion:
+
+```typescript
+const vulnerabilities = sanitizeVulnerabilities(
+  analysisResult.data.vulnerabilities as Record<string, unknown>[],
+);
+```
+
+Sanitization rules:
+- **Clamp field lengths**: title (200), description (2000), impact (1000), fix (2000), filePath (500), category (100)
+- **Enforce severity enum**: drop entries with unknown levels
+- **Drop invalid entries**: empty title or empty description → null (filtered out)
+- **Cap count**: maximum 50 vulnerabilities per audit
+
+This protects against Claude returning structurally valid but semantically problematic JSON (e.g., 500-character titles, 100 vulnerabilities, unknown severity levels).
+
 ---
 
 ## 6. Evaluation Logic
+
+All evaluator functions live in **`src/domain/audit/evaluator.ts`** (pure functions, shared by Convex actions and frontend).
 
 ### 6.1 Probability Calculation
 
 Deterministic scoring based on vulnerability count and severity.
 
 ```typescript
-const SEVERITY_PENALTIES: Record<string, number> = {
+// src/domain/audit/evaluator.ts
+
+export const SEVERITY_PENALTIES: Record<string, number> = {
   critical: 40,
   high: 25,
   medium: 10,
   low: 5,
 };
 
-function calculateSafetyProbability(
+export function calculateSafetyProbability(
   vulnerabilities: { level: string }[]
 ): number {
   if (vulnerabilities.length === 0) return 100;
@@ -305,7 +357,7 @@ function calculateSafetyProbability(
 Deterministic template-based summary.
 
 ```typescript
-function generateExecutiveSummary(
+export function generateExecutiveSummary(
   vulnerabilities: { level: string; category: string }[]
 ): string {
   if (vulnerabilities.length === 0) {
@@ -359,7 +411,25 @@ function generateExecutiveSummary(
 
 ## 7. Agent Activity Feed
 
+Three agent types create feed events:
+
+| Agent | Color | Events |
+|-------|-------|--------|
+| `INGESTION` | Indigo | "Fetching repository...", "Found N source files...", "Ingestion complete..." |
+| `SECURITY_ANALYST` | Emerald | One event per vulnerability found |
+| `EVALUATOR` | Purple | Executive summary |
+
 ### 7.1 Event Creation
+
+**During ingestion:**
+
+```typescript
+await ctx.runMutation(internal.auditEvents.create, {
+  auditId,
+  agent: "INGESTION",
+  message: `Fetching repository ${owner}/${repo} from GitHub...`,
+});
+```
 
 **On each vulnerability found:**
 
@@ -385,18 +455,15 @@ await ctx.runMutation(internal.auditEvents.create, {
 ### 7.2 Analyst Message Generation
 
 ```typescript
-function generateAnalystMessage(
-  vulnerability: Vulnerability,
+// src/domain/audit/evaluator.ts
+export function generateAnalystMessage(
+  vuln: { level: string; category: string; title: string; description: string; filePath?: string },
   displayId: string
 ): string {
-  const severityLabel = vulnerability.level.charAt(0).toUpperCase() + vulnerability.level.slice(1);
-
-  // Build a natural language message
-  const fileRef = vulnerability.filePath
-    ? ` in ${vulnerability.filePath}`
-    : "";
-
-  return `Found ${vulnerability.title}${fileRef}. ${vulnerability.description.split('.')[0]}. This is a ${severityLabel} ${vulnerability.category} vulnerability (${displayId}).`;
+  const severityLabel = vuln.level.charAt(0).toUpperCase() + vuln.level.slice(1);
+  const fileRef = vuln.filePath ? ` in ${vuln.filePath}` : "";
+  const firstSentence = vuln.description.split('.')[0];
+  return `Found ${vuln.title}${fileRef}. ${firstSentence}. This is a ${severityLabel} ${vuln.category} vulnerability (${displayId}).`;
 }
 ```
 
@@ -408,161 +475,86 @@ function generateAnalystMessage(
 
 ## 8. Service Implementation
 
+The analysis and evaluation phases are part of `startAuditAction` (see full action in audit-spec.md Section 5.1). Key patterns:
+
 ```typescript
-// convex/services/auditService.ts
+// convex/services/startAuditAction.ts (analysis + evaluation phases)
 
-import { v } from "convex/values";
-import { action } from "../_generated/server";
-import { internal } from "../_generated/api";
-import { MinMaxResponseSchema } from "./schemas";
+// Imports from domain layer
+import { calculateSafetyProbability, generateExecutiveSummary, generateDisplayId, generateAnalystMessage } from "../../src/domain/audit/evaluator";
+import { sanitizeVulnerabilities } from "../../src/domain/audit/sanitizeVulnerabilities";
+import { runSecurityAnalysis } from "../clients/claude";
 
-export const runAudit = action({
-  args: {
-    auditId: v.id("audits"),
-    files: v.array(v.object({
-      path: v.string(),
-      content: v.string(),
-    })),
-  },
-  handler: async (ctx, { auditId, files }) => {
+// === ANALYSIS PHASE (inside runAuditPipeline) ===
 
-    // 1. Update status to analyzing
-    await ctx.runMutation(internal.audits.updateStatus, {
-      auditId,
-      status: "analyzing",
-    });
-
-    // 2. Call MinMax
-    let minmaxResponse;
-    try {
-      minmaxResponse = await callMinMax(files);
-    } catch (error) {
-      await ctx.runMutation(internal.audits.fail, {
-        auditId,
-        error: error instanceof Error ? error.message : "MinMax API error",
-      });
-      return { success: false, error: { code: "AGENT_ERROR", message: "Analysis failed" } };
-    }
-
-    // 3. Validate response
-    const parsed = MinMaxResponseSchema.safeParse(minmaxResponse);
-    if (!parsed.success) {
-      await ctx.runMutation(internal.audits.fail, {
-        auditId,
-        error: "Invalid response from security analyzer",
-      });
-      return { success: false, error: { code: "INVALID_RESPONSE", message: parsed.error.message } };
-    }
-
-    const vulnerabilities = parsed.data.vulnerabilities;
-
-    // 4. Store each vulnerability + create feed event
-    for (let i = 0; i < vulnerabilities.length; i++) {
-      const vuln = vulnerabilities[i];
-      const seqNumber = i + 1;
-      const displayId = generateDisplayId(auditId, seqNumber);
-
-      const analysisId = await ctx.runMutation(internal.analyses.create, {
-        auditId,
-        seqNumber,
-        displayId,
-        category: vuln.category,
-        level: vuln.level,
-        title: vuln.title,
-        description: vuln.description,
-        filePath: vuln.filePath,
-        fix: vuln.fix,
-      });
-
-      await ctx.runMutation(internal.auditEvents.create, {
-        auditId,
-        agent: "SECURITY_ANALYST",
-        message: generateAnalystMessage(vuln, displayId),
-        analysisId,
-      });
-    }
-
-    // 5. Update status to evaluating
-    await ctx.runMutation(internal.audits.updateStatus, {
-      auditId,
-      status: "evaluating",
-    });
-
-    // 6. Calculate probability + generate summary
-    const probability = calculateSafetyProbability(vulnerabilities);
-    const executiveSummary = generateExecutiveSummary(vulnerabilities);
-
-    // 7. Store evaluation
-    await ctx.runMutation(internal.evaluations.create, {
-      auditId,
-      probability,
-      executiveSummary,
-    });
-
-    // 8. Create evaluator feed event
-    await ctx.runMutation(internal.auditEvents.create, {
-      auditId,
-      agent: "EVALUATOR",
-      message: executiveSummary,
-    });
-
-    // 9. Mark complete
-    await ctx.runMutation(internal.audits.updateStatus, {
-      auditId,
-      status: "complete",
-    });
-
-    return {
-      success: true,
-      data: {
-        vulnerabilityCount: vulnerabilities.length,
-        probability,
-      },
-    };
-  },
-});
-
-// Helper functions
-
-function generateDisplayId(auditId: string, seqNumber: number): string {
-  const shortId = auditId.slice(0, 1).toUpperCase();
-  const seq = String(seqNumber).padStart(3, "0");
-  return `SEC-${shortId}-${seq}`;
+// 1. Budget check before expensive Claude call
+if (isOverBudget(actionStart)) {
+  await ctx.runMutation(internal.audits.fail, {
+    auditId, error: "Audit timed out during ingestion. Try a smaller repository.",
+  });
+  return;
 }
 
-function generateAnalystMessage(vuln: Vulnerability, displayId: string): string {
-  const severityLabel = vuln.level.charAt(0).toUpperCase() + vuln.level.slice(1);
-  const fileRef = vuln.filePath ? ` in ${vuln.filePath}` : "";
-  const firstSentence = vuln.description.split('.')[0];
-  return `Found ${vuln.title}${fileRef}. ${firstSentence}. This is a ${severityLabel} ${vuln.category} vulnerability (${displayId}).`;
+await ctx.runMutation(internal.audits.updateStatus, { auditId, status: "analyzing" });
+
+// 2. Call Claude
+const analysisResult = await runSecurityAnalysis(files);
+if (!analysisResult.success) {
+  await ctx.runMutation(internal.audits.fail, { auditId, error: analysisResult.error.message });
+  return;
 }
 
-async function callMinMax(files: { path: string; content: string }[]): Promise<unknown> {
-  const response = await fetch(`${process.env.MINMAX_API_BASE}/v1/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.MINMAX_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "minmax-security-1",
-      messages: [
-        { role: "system", content: SECURITY_ANALYST_SYSTEM_PROMPT },
-        { role: "user", content: buildAnalysisPrompt(files) },
-      ],
-      response_format: { type: "json_object" },
-      temperature: 0.1,
-    }),
+// 3. FMEA #3: Sanitise after Zod validation
+const vulnerabilities = sanitizeVulnerabilities(
+  analysisResult.data.vulnerabilities as Record<string, unknown>[],
+);
+
+// 4. Store each vulnerability + create feed event
+for (let i = 0; i < vulnerabilities.length; i++) {
+  const vuln = vulnerabilities[i];
+  const seqNumber = i + 1;
+  const displayId = generateDisplayId(auditId, seqNumber);
+
+  const analysisId = await ctx.runMutation(internal.analyses.create, {
+    auditId, seqNumber, displayId,
+    category: vuln.category, level: vuln.level,
+    title: vuln.title, description: vuln.description,
+    impact: vuln.impact,               // NEW: impact field
+    filePath: vuln.filePath, fix: vuln.fix,
   });
 
-  if (!response.ok) {
-    throw new Error(`MinMax API error: ${response.status}`);
-  }
-
-  const data = await response.json();
-  return JSON.parse(data.choices[0].message.content);
+  await ctx.runMutation(internal.auditEvents.create, {
+    auditId, agent: "SECURITY_ANALYST",
+    message: generateAnalystMessage(vuln, displayId),
+    analysisId,
+  });
 }
+
+// === EVALUATION PHASE ===
+
+await ctx.runMutation(internal.audits.updateStatus, { auditId, status: "evaluating" });
+
+const probability = calculateSafetyProbability(vulnerabilities);
+const executiveSummary = generateExecutiveSummary(vulnerabilities);
+
+await ctx.runMutation(internal.evaluations.create, {
+  auditId, probability, executiveSummary,
+  vulnerabilityCount: vulnerabilities.length,  // NEW: stored for chart data
+});
+
+await ctx.runMutation(internal.auditEvents.create, {
+  auditId, agent: "EVALUATOR", message: executiveSummary,
+});
+
+await ctx.runMutation(internal.audits.updateStatus, { auditId, status: "complete" });
 ```
+
+**Key differences from v1.0:**
+- Pure functions imported from `src/domain/audit/evaluator.ts` (not defined inline)
+- `sanitizeVulnerabilities()` applied after Zod parse (FMEA #3)
+- `impact` field passed to `analyses.create`
+- `vulnerabilityCount` stored on evaluation record
+- Entire pipeline wrapped in try/catch (FMEA #1, see Section 3 flow diagram)
 
 ---
 
@@ -570,12 +562,34 @@ async function callMinMax(files: { path: string; content: string }[]): Promise<u
 
 | Error | Cause | Result |
 |-------|-------|--------|
-| MinMax API error | Network failure, 5xx, auth error | Audit fails, error stored |
-| MinMax rate limit | 429 response | Audit fails, error: "Rate limit exceeded" |
-| Invalid response | Response doesn't match Zod schema | Audit fails, error: "Invalid analyzer response" |
+| Claude API error | Network failure, 5xx, auth error | Audit fails, error stored |
+| Claude rate limit | 429 response | Audit fails, error: "Anthropic rate limit exceeded" |
+| Invalid response | Response doesn't match Zod schema | Audit fails, error: "Invalid Anthropic response" |
 | Empty response | No `vulnerabilities` array | Treated as 0 vulnerabilities (100% safe) |
+| Budget exceeded | Wall-clock > 540s before Claude call | Audit fails, error: "Audit timed out" |
+| Unexpected throw | Any uncaught exception | Catch block calls `audits.fail` (FMEA #1) |
 
-### 9.1 Failure Mutation
+### 9.1 Terminal State Guarantee (FMEA #1)
+
+The `startAudit` action wraps its entire pipeline in try/catch:
+
+```typescript
+export const startAudit = internalAction({
+  handler: async (ctx, { auditId, owner, repo }) => {
+    try {
+      await runAuditPipeline(ctx, { auditId, owner, repo, actionStart: Date.now() });
+    } catch (err) {
+      // Belt-and-suspenders: force terminal state on any unexpected throw
+      const message = err instanceof Error ? err.message : "Unexpected internal error";
+      await ctx.runMutation(internal.audits.fail, { auditId, error: message });
+    }
+  },
+});
+```
+
+This guarantees every audit reaches `complete` or `failed` — never stuck in `pending`/`fetching`/`analyzing`/`evaluating`.
+
+### 9.2 Failure Mutation
 
 ```typescript
 // convex/audits.ts
@@ -629,127 +643,115 @@ const events = useQuery(api.auditEvents.listByAudit, { auditId });
 ## 11. Sequence Diagram
 
 ```
-Ingest                  Audit Service            MinMax API            Database
+Ingestion Phase         startAuditAction          Claude API            Database
   │                          │                       │                    │
-  │  runAudit(auditId,       │                       │                    │
-  │  files)                  │                       │                    │
+  │  (files ingested)        │                       │                    │
   │─────────────────────────►│                       │                    │
+  │                          │                       │                    │
+  │                          │  budget check         │                    │
+  │                          │  (FMEA #1)            │                    │
   │                          │                       │                    │
   │                          │  updateStatus         │                    │
   │                          │  (analyzing)          │                    │
   │                          │───────────────────────────────────────────►│
   │                          │                       │                    │
-  │                          │  POST /chat/          │                    │
-  │                          │  completions          │                    │
+  │                          │  POST /v1/messages    │                    │
   │                          │──────────────────────►│                    │
   │                          │                       │                    │
   │                          │  { vulnerabilities }  │                    │
   │                          │◄──────────────────────│                    │
   │                          │                       │                    │
   │                          │  validate (Zod)       │                    │
-  │                          │                       │                    │
+  │                          │  sanitize (FMEA #3)   │                    │
   │                          │                       │                    │
   │                          │  for each vuln:       │                    │
   │                          │    create analysis    │                    │
+  │                          │    (with impact)      │                    │
   │                          │───────────────────────────────────────────►│
-  │                          │    create event       │                    │
-  │                          │───────────────────────────────────────────►│
-  │                          │                       │    (real-time      │
-  │                          │                       │     to frontend)   │
+  │                          │    create event       │    (real-time      │
+  │                          │───────────────────────────────────────────►│ to frontend)
   │                          │                       │                    │
   │                          │  updateStatus         │                    │
   │                          │  (evaluating)         │                    │
   │                          │───────────────────────────────────────────►│
   │                          │                       │                    │
-  │                          │  calculate score      │                    │
-  │                          │  (pure function)      │                    │
+  │                          │  calculateSafety      │                    │
+  │                          │  Probability()        │                    │
+  │                          │  (pure fn from        │                    │
+  │                          │   evaluator.ts)       │                    │
   │                          │                       │                    │
   │                          │  create evaluation    │                    │
+  │                          │  (+ vulnCount)        │                    │
   │                          │───────────────────────────────────────────►│
   │                          │                       │                    │
-  │                          │  create evaluator     │                    │
-  │                          │  event                │                    │
+  │                          │  EVALUATOR event      │                    │
   │                          │───────────────────────────────────────────►│
   │                          │                       │                    │
   │                          │  updateStatus         │                    │
   │                          │  (complete)           │                    │
   │                          │───────────────────────────────────────────►│
-  │                          │                       │                    │
-  │  { success, data }       │                       │                    │
-  │◄─────────────────────────│                       │                    │
 ```
 
 ---
 
 ## 12. Testing
 
-### 12.1 Unit Tests
+### 12.1 Unit Tests (in `test/unit/domain/audit/`)
 
-| Test | Input | Expected |
-|------|-------|----------|
-| Display ID generation | auditId="abc", seq=1 | "SEC-A-001" |
-| Display ID generation | auditId="xyz", seq=15 | "SEC-X-015" |
-| Probability: no vulns | [] | 100 |
-| Probability: 1 critical | [critical] | 60 |
-| Probability: overflow | [5 critical] | 0 (clamped) |
-| Summary: no vulns | [] | "No security vulnerabilities detected..." |
-| Summary: mixed | [2 critical, 1 high] | Contains "2 Critical and 1 High" |
+| Test File | Key Cases |
+|-----------|-----------|
+| `evaluator.test.ts` | Display ID generation, probability calculation (0 vulns → 100, 1 critical → 60, 5 critical → 0 clamped), executive summary templates |
+| `sanitizeVulnerabilities.test.ts` | Field truncation at limits, dropping invalid entries, cap at 50, pass-through of valid data |
+
+See also `auditMappers.test.ts` in `test/unit/frontend/lib/` for frontend contract tests.
 
 ### 12.2 Integration Tests
 
 | Test | Setup | Expected |
 |------|-------|----------|
-| Happy path | Valid files, MinMax returns 2 vulns | 2 analyses, 2 events, 1 evaluation, status=complete |
-| No vulnerabilities | Valid files, MinMax returns [] | 0 analyses, 1 evaluation (100%), status=complete |
-| MinMax error | MinMax returns 500 | status=failed, error stored |
-| Invalid response | MinMax returns malformed JSON | status=failed, error="Invalid analyzer response" |
-
-### 12.3 Mock MinMax for Tests
-
-```typescript
-vi.spyOn(global, "fetch").mockResolvedValue(
-  new Response(
-    JSON.stringify({
-      choices: [{
-        message: {
-          content: JSON.stringify({
-            vulnerabilities: [
-              {
-                category: "authentication",
-                level: "critical",
-                title: "Test Vulnerability",
-                description: "Test description.",
-              },
-            ],
-          }),
-        },
-      }],
-    }),
-    { status: 200 }
-  )
-);
-```
+| Happy path | Valid files, Claude returns 2 vulns | 2 analyses (with impact), 2 SECURITY_ANALYST events, 1 evaluation (with vulnCount), status=complete |
+| No vulnerabilities | Valid files, Claude returns [] | 0 analyses, 1 evaluation (100%), status=complete |
+| Claude error | Claude returns 500 | status=failed, error stored |
+| Claude rate limit | Claude returns 429 | status=failed, error="Anthropic rate limit exceeded" |
+| Invalid response | Claude returns malformed JSON | status=failed, error="Invalid Anthropic response" |
+| Budget exceeded | Wall-clock > 540s before Claude call | status=failed, error="Audit timed out" |
 
 ---
 
 ## 13. Environment Variables
 
 ```bash
-MINMAX_API_BASE=https://api.minimax.io   # Or actual endpoint
-MINMAX_API_KEY=sk-xxxx                    # Required
+# Set in Convex dashboard (server-side, accessed via process.env in actions)
+CLAUDE_CODE_API_KEY=sk-xxxx      # Anthropic API key (required)
+GITHUB_API_KEY=ghp_xxxx          # GitHub personal access token (required for 5k/hr rate limit)
+
+# Set in .env.local (client-side)
+NEXT_PUBLIC_CONVEX_URL=https://xxx.convex.cloud
 ```
 
 ---
 
-## 14. Future Enhancements (v1.1+)
+## 14. FMEA Summary
+
+| # | Failure Mode | Mitigation | Implementation |
+|---|-------------|------------|----------------|
+| 1 | Action exceeds runtime / stalls | Wall-clock budget + try/catch envelope | `actionBudget.ts` + action wrapper |
+| 2 | GitHub rate limit misclassified | Centralised `normalizeGitHubError` | `normalizeGitHubError.ts` |
+| 3 | Claude returns bad semantics | Post-Zod sanitisation layer | `sanitizeVulnerabilities.ts` |
+| 4 | Frontend/Convex contract drift | Mapper contract tests | `auditMappers.test.ts` |
+
+---
+
+## 15. Future Enhancements (v1.1+)
 
 | Enhancement | Description |
 |-------------|-------------|
-| Retrvr integration | Search for related CVEs/hacks per vulnerability |
+| CVE enrichment | Search for related CVEs/hacks per vulnerability |
 | LLM-generated summary | Replace template summary with LLM call for richer prose |
-| Chunked analysis | Split large repos across multiple MinMax calls |
+| Chunked analysis | Split large repos across multiple Claude calls |
 | Confidence scores | Add confidence field to vulnerabilities |
 | Fix verification | Re-audit specific files after user claims fix |
+| Audit comparison | Diff vulnerability sets between audit runs |
 
 ---
 
@@ -757,4 +759,5 @@ MINMAX_API_KEY=sk-xxxx                    # Required
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.1.0 | 2026-02-21 | Replace MinMax with Claude (Anthropic); add impact field; FMEA mitigations (budget, sanitization, terminal state guarantee); INGESTION agent; vulnerabilityCount on evaluations; domain pure function references; unified action model |
 | 1.0.0 | 2026-02-21 | Initial audit protocol |

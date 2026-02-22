@@ -1,6 +1,6 @@
 # Database Doctrine (Convex)
 
-**Version**: 1.0.0
+**Version**: 1.1.0
 **Status**: Binding
 **Date**: 2026-02-21
 **App**: Vibesafe
@@ -25,7 +25,8 @@ Keywords MUST, MUST NOT, SHOULD, MAY follow RFC 2119.
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │                      Tables                               │   │
-│  │  audits · audit_evaluations · audit_analyses              │   │
+│  │  audits · audit_events · audit_analyses                   │   │
+│  │  audit_evaluations                                        │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
@@ -51,27 +52,39 @@ import { v } from "convex/values";
 export default defineSchema({
   audits: defineTable({
     repoUrl: v.string(),
-    commitHash: v.string(),
+    repoOwner: v.string(),
+    repoName: v.string(),
+    commitHash: v.optional(v.string()),  // Set after GitHub fetch
     status: v.union(
       v.literal("pending"),
+      v.literal("fetching"),
       v.literal("analyzing"),
       v.literal("evaluating"),
       v.literal("complete"),
       v.literal("failed")
     ),
-    userId: v.optional(v.string()), // GitHub user or anonymous
+    error: v.optional(v.string()),
+    truncated: v.optional(v.boolean()),
+    userId: v.optional(v.string()),
   })
     .index("by_user", ["userId"])
-    .index("by_repo", ["repoUrl"]),
+    .index("by_url", ["repoUrl"]),
 
-  audit_evaluations: defineTable({
+  audit_events: defineTable({
     auditId: v.id("audits"),
-    probability: v.number(), // 0-100
-    executiveSummary: v.string(),
+    agent: v.union(
+      v.literal("INGESTION"),
+      v.literal("SECURITY_ANALYST"),
+      v.literal("EVALUATOR"),
+    ),
+    message: v.string(),
+    analysisId: v.optional(v.id("audit_analyses")),
   }).index("by_audit", ["auditId"]),
 
   audit_analyses: defineTable({
     auditId: v.id("audits"),
+    seqNumber: v.number(),
+    displayId: v.string(),
     category: v.string(),
     level: v.union(
       v.literal("low"),
@@ -81,9 +94,16 @@ export default defineSchema({
     ),
     title: v.string(),
     description: v.string(),
+    impact: v.optional(v.string()),
     filePath: v.optional(v.string()),
     fix: v.optional(v.string()),
-    links: v.optional(v.array(v.string())),
+  }).index("by_audit", ["auditId"]),
+
+  audit_evaluations: defineTable({
+    auditId: v.id("audits"),
+    probability: v.number(),        // 0-100
+    executiveSummary: v.string(),
+    vulnerabilityCount: v.number(),  // Avoids N+1 queries for chart data
   }).index("by_audit", ["auditId"]),
 });
 ```
@@ -108,11 +128,16 @@ export default defineSchema({
 ```
 convex/
 ├── schema.ts                 # Schema definition
-├── audits.ts                 # Audit CRUD
+├── audits.ts                 # Audit CRUD + createAndStart mutation
+├── auditEvents.ts            # Feed event CRUD
 ├── analyses.ts               # Analysis CRUD
 ├── evaluations.ts            # Evaluation CRUD
+├── clients/
+│   ├── github.ts             # GitHub REST API client
+│   └── claude.ts             # Anthropic Messages API client
 ├── services/
-│   └── auditService.ts       # Orchestration actions
+│   ├── auditService.ts       # Legacy orchestration (analysis-only)
+│   └── startAuditAction.ts   # Unified ingestion + analysis + evaluation
 └── _generated/               # Auto-generated (do not edit)
 ```
 
@@ -144,16 +169,27 @@ export const listByRepo = query({
 ### 5.3 Mutation Pattern
 
 ```typescript
-// Simple write: return ID
-export const create = mutation({
-  args: { repoUrl: v.string(), commitHash: v.string() },
-  handler: async (ctx, { repoUrl, commitHash }) => {
+// Create + schedule action: validate, insert, schedule in one mutation
+export const createAndStart = mutation({
+  args: { repoUrl: v.string() },
+  handler: async (ctx, { repoUrl }) => {
+    const parsed = parseGitHubUrl(repoUrl);
+    if (!parsed) throw new Error("INVALID_URL");
+
+    const normalizedUrl = `https://github.com/${parsed.owner}/${parsed.repo}`;
+
     const auditId = await ctx.db.insert("audits", {
-      repoUrl,
-      commitHash,
+      repoUrl: normalizedUrl,
+      repoOwner: parsed.owner,
+      repoName: parsed.repo,
       status: "pending",
     });
-    return auditId;
+
+    await ctx.scheduler.runAfter(0, internal.services.startAuditAction.startAudit, {
+      auditId, owner: parsed.owner, repo: parsed.repo,
+    });
+
+    return { auditId, repoUrl: normalizedUrl };
   },
 });
 
@@ -163,6 +199,7 @@ export const updateStatus = mutation({
     auditId: v.id("audits"),
     status: v.union(
       v.literal("pending"),
+      v.literal("fetching"),
       v.literal("analyzing"),
       v.literal("evaluating"),
       v.literal("complete"),
@@ -178,37 +215,25 @@ export const updateStatus = mutation({
 ### 5.4 Action Pattern (External APIs)
 
 ```typescript
-// For MinMax/Retrvr calls: structured return
-export const runAnalysis = action({
-  args: { auditId: v.id("audits") },
-  handler: async (ctx, { auditId }): Promise<AnalysisResult> => {
+// Unified pipeline action: ingest + analyze + evaluate
+export const startAudit = internalAction({
+  args: {
+    auditId: v.id("audits"),
+    owner: v.string(),
+    repo: v.string(),
+  },
+  handler: async (ctx, { auditId, owner, repo }) => {
+    const actionStart = Date.now(); // Wall-clock budget
+
+    // Guarantee: every code path reaches 'complete' or 'failed'
     try {
-      // Call MinMax agent
-      const analyses = await minmaxClient.analyze(repoContents);
-
-      // Write to DB via mutation
-      await ctx.runMutation(internal.analyses.createBatch, {
-        auditId,
-        analyses,
-      });
-
-      return { success: true, data: { count: analyses.length } };
-    } catch (error) {
-      return {
-        success: false,
-        error: {
-          code: "AGENT_ERROR",
-          message: error instanceof Error ? error.message : "Unknown error"
-        }
-      };
+      await runAuditPipeline(ctx, { auditId, owner, repo, actionStart });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unexpected internal error";
+      await ctx.runMutation(internal.audits.fail, { auditId, error: message });
     }
   },
 });
-
-// Type for structured returns
-type AnalysisResult =
-  | { success: true; data: { count: number } }
-  | { success: false; error: { code: string; message: string } };
 ```
 
 ---
@@ -280,12 +305,17 @@ For the agent activity feed, insert `audit_analyses` rows as they're generated �
     ┌─────────┐
     │ pending │
     └────┬────┘
-         │ startAudit()
+         │ createAndStart()
+         ▼
+    ┌──────────┐
+    │ fetching │ ◄─── Ingestion: GitHub tree + blob fetch
+    └────┬─────┘
+         │ files ingested
          ▼
     ┌───────────┐
-    │ analyzing │ ◄─── MinMax writing analyses
+    │ analyzing │ ◄─── Claude security analysis
     └─────┬─────┘
-          │ all analyses complete
+          │ vulnerabilities stored
           ▼
     ┌────────────┐
     │ evaluating │ ◄─── Evaluator aggregating
@@ -315,9 +345,12 @@ For the agent activity feed, insert `audit_analyses` rows as they're generated �
 | `UNAUTHORIZED` | Auth required but not present |
 | `NOT_FOUND` | Entity does not exist |
 | `INVALID_STATE` | Operation not valid in current audit state |
-| `AGENT_ERROR` | MinMax/Retrvr call failed |
+| `PRIVATE_REPO` | Repository is private or inaccessible |
 | `GITHUB_ERROR` | Failed to fetch repo contents |
 | `RATE_LIMIT` | External API quota exceeded |
+| `CLAUDE_ERROR` | Anthropic API failure |
+| `INVALID_RESPONSE` | Claude returned malformed JSON |
+| `BUDGET_EXCEEDED` | Action exceeded wall-clock time limit |
 
 ### 9.2 When to Throw vs Return
 
@@ -334,9 +367,10 @@ For the agent activity feed, insert `audit_analyses` rows as they're generated �
 
 - MUST use `v.id("table")` for foreign keys (not `v.string()`)
 - MUST define indexes for all query patterns
-- MUST NOT store derived/computed values (compute in queries)
+- MUST NOT store derived/computed values — except `vulnerabilityCount` on evaluations (avoids N+1 for chart data)
+- MUST wrap long-running actions in try/catch to guarantee terminal state (`complete` or `failed`)
 - SHOULD use `internal.*` for mutations called from actions
-- SHOULD keep actions thin (orchestration only, logic in mutations)
+- SHOULD use `ctx.scheduler.runAfter(0, ...)` to trigger actions from mutations
 
 ---
 
@@ -364,5 +398,6 @@ For the agent activity feed, insert `audit_analyses` rows as they're generated �
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.1.0 | 2026-02-21 | Audit feature: added audit_events table, fetching status, optional commitHash, impact field, vulnerabilityCount, updated state machine and action patterns |
 | 1.0.0 | 2026-02-21 | Initial Convex database doctrine for Vibesafe |
 
