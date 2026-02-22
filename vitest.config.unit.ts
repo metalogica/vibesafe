@@ -28,6 +28,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      '@/': path.resolve(process.cwd(), './') + '/',
       '@domain': path.resolve(process.cwd(), './src/domain'),
       '@frontend': path.resolve(process.cwd(), './src/frontend'),
       '@server': path.resolve(process.cwd(), './src/server'),

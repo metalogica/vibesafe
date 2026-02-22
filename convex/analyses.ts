@@ -16,6 +16,7 @@ export const create = internalMutation({
     ),
     title: v.string(),
     description: v.string(),
+    impact: v.optional(v.string()),
     filePath: v.optional(v.string()),
     fix: v.optional(v.string()),
     links: v.optional(v.array(v.string())),

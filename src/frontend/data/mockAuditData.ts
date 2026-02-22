@@ -17,65 +17,60 @@ export const INITIAL_VULNERABILITIES: Vulnerability[] = [
     title: 'Unauthenticated Payment Session Creation',
     file: '/api/create-checkout-session.ts',
     severity: 'critical',
+    category: 'authentication',
     description:
-      "The /api/create-checkout-session endpoint accepts userId directly from the request body without verifying the caller's identity. An attacker can create Stripe checkout sessions for any user ID, complete the payment themselves, and credit another user's account.",
+      "The /api/create-checkout-session endpoint accepts userId directly from the request body without verifying the caller's identity.",
     impact:
-      'Direct revenue theft and fraudulent crediting. Attackers can fund arbitrary accounts without authorization.',
-    fix: "Replace client-provided userId with server-authenticated user ID. Modify /api/create-checkout-session.ts to:\n1. Accept bearer token in Authorization header\n2. Call supabaseAdmin.auth.getUser(token) to extract verified user.id\n3. Use this server-verified ID for metadata.userId\n4. Reject requests with missing/invalid tokens (401)",
-    status: 'open',
-    commitDetected: '8f2a1b',
+      'Direct revenue theft and fraudulent crediting.',
+    fix: 'Replace client-provided userId with server-authenticated user ID.',
   },
   {
     id: 'SEC-A-002',
     title: 'Webhook Payment Replay Attack',
     file: '/api/webhooks/stripe.ts',
     severity: 'critical',
+    category: 'authorization',
     description:
-      'The Stripe webhook handler lacks idempotency controls. It inserts payment records based solely on session.metadata.userId and amount_total without checking if the stripe_payment_id already exists.',
+      'The Stripe webhook handler lacks idempotency controls.',
     impact:
-      'Unlimited credit creation and financial loss. An attacker can replay the same webhook event indefinitely to mint credits.',
-    fix: "Add idempotency key checking before payment insertion. Modify /api/webhooks/stripe.ts to:\n1. Query payments table for existing stripe_payment_id before insert\n2. If record exists, log warning and return 200\n3. Add unique constraint on stripe_payment_id column",
-    status: 'open',
-    commitDetected: '8f2a1b',
+      'Unlimited credit creation and financial loss.',
+    fix: 'Add idempotency key checking before payment insertion.',
   },
   {
     id: 'SEC-A-003',
     title: 'Client-Side Credit Enforcement Bypass',
     file: 'services/geminiService.ts',
     severity: 'critical',
+    category: 'authorization',
     description:
-      'Hybrid generation paths bypass server-side credit validation. In local mode, credit deduction occurs client-side via a "fire-and-forget" RLS insert which can be blocked or manipulated.',
+      'Hybrid generation paths bypass server-side credit validation.',
     impact:
-      'Free unlimited usage and monetization failure. Attackers can generate content without paying.',
-    fix: "Remove local generation mode from production builds.\n1. Remove API_KEY from all environment configs\n2. Force all production calls through /api/generate with server-side credit checks\n3. Add server-side rate limiting",
-    status: 'open',
-    commitDetected: '8f2a1b',
+      'Free unlimited usage and monetization failure.',
+    fix: 'Remove local generation mode from production builds.',
   },
   {
     id: 'SEC-A-004',
     title: 'Public Project UUID Enumeration',
     file: 'hooks/session/useProjectState.ts',
     severity: 'high',
+    category: 'exposure',
     description:
-      'Insufficient RLS enables enumeration of project UUIDs. Client queries filter by owner_id but the RLS policy allows SELECT if is_public = true, enabling enumeration of all public projects.',
+      'Insufficient RLS enables enumeration of project UUIDs.',
     impact:
-      'Cross-tenant data exposure. Attackers can scrape all public project metadata and file paths.',
-    fix: "Tighten RLS policies and add explicit share tokens.\n1. Remove anonymous SELECT policy on projects table\n2. Add share_token column to projects\n3. Require share_token in RLS policy for public access",
-    status: 'open',
-    commitDetected: '8f2a1b',
+      'Cross-tenant data exposure.',
+    fix: 'Tighten RLS policies and add explicit share tokens.',
   },
   {
     id: 'SEC-A-007',
     title: 'API Key Exposure in Client Bundle',
     file: 'services/geminiService.ts',
     severity: 'high',
+    category: 'exposure',
     description:
-      'API keys risk inclusion in client bundles. The system instruction and API key logic is bundled into client-side JavaScript if process.env.API_KEY is set during build.',
+      'API keys risk inclusion in client bundles.',
     impact:
-      'API abuse and unexpected provider charges. Leaks proprietary prompt engineering IP.',
-    fix: "Remove all Google Gemini API interaction from client.\n1. Delete API_KEY references from .env\n2. Move SYSTEM_INSTRUCTION_TEXT to server-only module\n3. Audit production bundle to confirm removal",
-    status: 'open',
-    commitDetected: '8f2a1b',
+      'API abuse and unexpected provider charges.',
+    fix: 'Remove all Google Gemini API interaction from client.',
   },
 ];
 

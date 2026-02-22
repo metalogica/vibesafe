@@ -6,7 +6,6 @@ import {
   CheckCircle2,
   Info,
   Maximize2,
-  XCircle,
 } from 'lucide-react';
 
 import type { SeverityFilter, Vulnerability } from '@/src/frontend/types';
@@ -17,8 +16,6 @@ interface VulnerabilitiesPanelProps {
   setFilter: (filter: SeverityFilter) => void;
   isLoading?: boolean;
   onVulnerabilityClick: (vuln: Vulnerability) => void;
-  onApplyFixes?: () => void;
-  isAuditComplete?: boolean;
 }
 
 function getSeverityColor(severity: string) {
@@ -65,8 +62,6 @@ export function VulnerabilitiesPanel({
   setFilter,
   isLoading = false,
   onVulnerabilityClick,
-  onApplyFixes,
-  isAuditComplete = false,
 }: VulnerabilitiesPanelProps) {
   const filteredVulnerabilities = vulnerabilities.filter(
     (v) => filter === 'all' || v.severity === filter,
@@ -116,11 +111,7 @@ export function VulnerabilitiesPanel({
             <div
               key={vuln.id}
               onClick={() => onVulnerabilityClick(vuln)}
-              className={`group relative cursor-pointer rounded-lg border p-4 transition-all hover:border-[#4DA3FF]/50 ${
-                vuln.status === 'fixed'
-                  ? 'border-[#1C2430] bg-[#131B26]/50 opacity-60'
-                  : 'border-[#1C2430] bg-[#131B26] hover:bg-[#1C2430]/80'
-              }`}
+              className="group relative cursor-pointer rounded-lg border border-[#1C2430] bg-[#131B26] p-4 transition-all hover:border-[#4DA3FF]/50 hover:bg-[#1C2430]/80"
             >
               <div className="absolute right-4 top-4 opacity-0 transition-opacity group-hover:opacity-100">
                 <Maximize2 className="h-4 w-4 text-[#4DA3FF]" />
@@ -140,15 +131,6 @@ export function VulnerabilitiesPanel({
                     {vuln.id}
                   </span>
                 </div>
-                {vuln.status === 'fixed' ? (
-                  <span className="flex items-center gap-1 text-xs font-medium text-emerald-500">
-                    <CheckCircle2 className="h-3 w-3" /> Fixed
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-1 text-xs font-medium text-red-400">
-                    <XCircle className="h-3 w-3" /> Open
-                  </span>
-                )}
               </div>
 
               <h3 className="mb-1 line-clamp-1 text-sm font-semibold text-[#E6EEF8] transition-colors group-hover:text-[#4DA3FF]">
@@ -168,27 +150,10 @@ export function VulnerabilitiesPanel({
                 </span>
               </div>
 
-              <div className="mt-2 flex justify-end">
-                <span className="text-[10px] text-[#8FA3B8]/50">
-                  Detected in {vuln.commitDetected.substring(0, 7)}
-                </span>
-              </div>
             </div>
           ))
         )}
       </div>
-
-      {onApplyFixes && isAuditComplete && (
-        <div className="border-t border-[#1C2430] bg-[#0B0F14] p-4">
-          <button
-            onClick={onApplyFixes}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#4DA3FF] py-3 font-medium text-white shadow-lg shadow-blue-500/20 transition-all hover:bg-[#3b82f6] active:scale-[0.98]"
-          >
-            <CheckCircle2 className="h-4 w-4" />
-            Apply Fixes & Commit
-          </button>
-        </div>
-      )}
     </div>
   );
 }

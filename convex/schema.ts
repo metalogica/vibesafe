@@ -6,7 +6,7 @@ export default defineSchema({
     repoUrl: v.string(),
     repoOwner: v.string(),
     repoName: v.string(),
-    commitHash: v.string(),
+    commitHash: v.optional(v.string()),
     status: v.union(
       v.literal('pending'),
       v.literal('fetching'),
@@ -44,6 +44,7 @@ export default defineSchema({
     ),
     title: v.string(),
     description: v.string(),
+    impact: v.optional(v.string()),
     filePath: v.optional(v.string()),
     fix: v.optional(v.string()),
     links: v.optional(v.array(v.string())),
@@ -53,11 +54,13 @@ export default defineSchema({
     auditId: v.id('audits'),
     probability: v.number(),
     executiveSummary: v.string(),
+    vulnerabilityCount: v.number(),
   }).index('by_audit', ['auditId']),
 
   audit_events: defineTable({
     auditId: v.id('audits'),
     agent: v.union(
+      v.literal('INGESTION'),
       v.literal('SECURITY_ANALYST'),
       v.literal('EVALUATOR'),
     ),
