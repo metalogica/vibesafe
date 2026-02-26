@@ -16,12 +16,6 @@ export interface AuditSnapshot {
   vulnerabilities: Vulnerability[];
 }
 
-export interface CommitData {
-  hash: string;
-  consensus: number;
-  vulnerabilityCount: number;
-}
-
 export type Severity = 'critical' | 'high' | 'medium' | 'low';
 
 export type SeverityFilter = 'all' | Severity;
