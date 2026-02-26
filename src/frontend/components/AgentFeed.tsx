@@ -10,6 +10,7 @@ import type { AgentMessage } from '@/src/frontend/types';
 interface AgentFeedProps {
   messages: AgentMessage[];
   isAuditing: boolean;
+  streamingText: string | null;
 }
 
 function getAgentIcon(agent: string) {
@@ -64,14 +65,14 @@ function getAgentTextColor(agent: string) {
   }
 }
 
-export function AgentFeed({ messages, isAuditing }: AgentFeedProps) {
+export function AgentFeed({ messages, isAuditing, streamingText }: AgentFeedProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, streamingText]);
 
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-xl border border-[#1C2430] bg-[#0F1620]">
@@ -140,6 +141,34 @@ export function AgentFeed({ messages, isAuditing }: AgentFeedProps) {
               </motion.div>
             ))}
           </AnimatePresence>
+
+          {streamingText && (
+            <motion.div
+              key="streaming-text"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="flex gap-4 border-b border-[#1C2430]/50 p-4 bg-emerald-500/5"
+            >
+              <div className="shrink-0 pt-1">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg border bg-emerald-500/10 border-emerald-500/30 text-emerald-400">
+                  <ShieldAlert className="h-4 w-4" />
+                </div>
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="mb-1 flex items-center gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                    Security Analyst
+                  </span>
+                  <span className="text-[10px] text-emerald-400/60 animate-pulse">
+                    analyzing...
+                  </span>
+                </div>
+                <pre className="whitespace-pre-wrap font-sans text-xs font-light leading-relaxed text-[#E6EEF8]/70 max-h-48 overflow-y-auto">
+                  {streamingText}
+                </pre>
+              </div>
+            </motion.div>
+          )}
 
           {messages.length === 0 && !isAuditing && (
             <div className="flex flex-col items-center justify-center py-12 text-[#8FA3B8] opacity-50">

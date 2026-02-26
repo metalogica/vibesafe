@@ -67,4 +67,21 @@ export default defineSchema({
     message: v.string(),
     analysisId: v.optional(v.id('audit_analyses')),
   }).index('by_audit', ['auditId']),
+
+  audit_inferences: defineTable({
+    auditId: v.id('audits'),
+    agent: v.string(),
+    model: v.string(),
+    prompt: v.string(),
+    response: v.optional(v.string()),
+    streamingText: v.string(),
+    status: v.union(
+      v.literal('streaming'),
+      v.literal('complete'),
+      v.literal('failed'),
+    ),
+    inputTokens: v.optional(v.number()),
+    outputTokens: v.optional(v.number()),
+    error: v.optional(v.string()),
+  }).index('by_audit', ['auditId']),
 });

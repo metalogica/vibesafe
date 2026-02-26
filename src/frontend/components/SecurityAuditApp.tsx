@@ -80,6 +80,10 @@ export default function SecurityAuditApp({
     api.evaluations.getByAudit,
     currentAuditId ? { auditId: currentAuditId } : 'skip',
   );
+  const streamingInference = useQuery(
+    api.inferences.getStreamingByAudit,
+    currentAuditId ? { auditId: currentAuditId } : 'skip',
+  );
 
   // Audit history for this repo
   const normalizedUrl = useMemo(() => {
@@ -331,6 +335,7 @@ export default function SecurityAuditApp({
             <AgentFeed
               messages={messages}
               isAuditing={uiStatus === 'auditing' && !selectedCommitHash}
+              streamingText={streamingInference?.streamingText ?? null}
             />
           </div>
         </section>
