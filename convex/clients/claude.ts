@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { createIncrementalVulnerabilityParser } from '../../src/domain/audit/incrementalVulnerabilityParser';
+import { createSSEParser } from '../../src/domain/audit/sseParser';
 import {
   ClaudeAnalysisResponseSchema,
   type Vulnerability,
@@ -60,7 +62,7 @@ Example response:
   ]
 }`;
 
-function buildAnalysisPrompt(
+export function buildAnalysisPrompt(
   files: { path: string; content: string }[],
 ): string {
   const fileContents = files
@@ -186,5 +188,165 @@ export async function runSecurityAnalysis(
         message: error instanceof Error ? error.message : 'Unknown error',
       },
     };
+  }
+}
+
+export interface StreamingCallbacks {
+  onTextDelta: (accumulatedText: string) => Promise<void>;
+  onVulnerabilityParsed: (vuln: Vulnerability, seqNumber: number) => Promise<void>;
+  onComplete: (result: {
+    fullResponse: string;
+    inputTokens: number;
+    outputTokens: number;
+  }) => Promise<void>;
+  onError: (error: { code: string; message: string }) => Promise<void>;
+}
+
+export async function runStreamingSecurityAnalysis(
+  files: { path: string; content: string }[],
+  callbacks: StreamingCallbacks,
+): Promise<ClaudeClientResult<{ vulnerabilities: Vulnerability[] }>> {
+  try {
+    const response = await fetch(`${ANTHROPIC_API_BASE}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.CLAUDE_CODE_API_KEY ?? '',
+        'anthropic-version': ANTHROPIC_VERSION,
+      },
+      body: JSON.stringify({
+        model: DEFAULT_MODEL,
+        max_tokens: 8192,
+        stream: true,
+        system: SECURITY_ANALYST_SYSTEM_PROMPT,
+        messages: [
+          {
+            role: 'user',
+            content: buildAnalysisPrompt(files),
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      const errorResult: ClaudeClientResult<{ vulnerabilities: Vulnerability[] }> =
+        response.status === 429
+          ? {
+              success: false,
+              error: { code: 'RATE_LIMIT', message: 'Anthropic rate limit exceeded' },
+            }
+          : {
+              success: false,
+              error: { code: 'CLAUDE_ERROR', message: `Anthropic API error: ${response.status}` },
+            };
+      await callbacks.onError(errorResult.error);
+      return errorResult;
+    }
+
+    if (!response.body) {
+      const error = { code: 'INVALID_RESPONSE', message: 'No response body from Anthropic' };
+      await callbacks.onError(error);
+      return { success: false, error };
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const sseParser = createSSEParser();
+    const vulnParser = createIncrementalVulnerabilityParser();
+
+    let accumulatedText = '';
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let completeCalled = false;
+    const allVulnerabilities: Vulnerability[] = [];
+
+    let lastFlushTime = 0;
+    let lastFlushedLength = 0;
+    const FLUSH_INTERVAL_MS = 1000;
+    const MIN_FLUSH_CHARS = 200;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      const events = sseParser.feed(chunk);
+
+      for (const event of events) {
+        if (event.event === 'message_start') {
+          try {
+            const data = JSON.parse(event.data);
+            inputTokens = data?.message?.usage?.input_tokens ?? 0;
+          } catch {
+            // skip
+          }
+        } else if (event.event === 'content_block_delta') {
+          try {
+            const data = JSON.parse(event.data);
+            if (data?.delta?.type === 'text_delta' && data?.delta?.text) {
+              const text = data.delta.text as string;
+              accumulatedText += text;
+
+              // Feed to vulnerability parser
+              const newVulns = vulnParser.feed(text);
+              for (const vuln of newVulns) {
+                allVulnerabilities.push(vuln);
+                await callbacks.onVulnerabilityParsed(vuln, vulnParser.getParsedCount());
+              }
+
+              // Throttled text delta callback
+              const now = Date.now();
+              const charsSinceFlush = accumulatedText.length - lastFlushedLength;
+              if (
+                now - lastFlushTime >= FLUSH_INTERVAL_MS &&
+                charsSinceFlush >= MIN_FLUSH_CHARS
+              ) {
+                await callbacks.onTextDelta(accumulatedText);
+                lastFlushTime = now;
+                lastFlushedLength = accumulatedText.length;
+              }
+            }
+          } catch {
+            // skip malformed delta
+          }
+        } else if (event.event === 'message_delta') {
+          try {
+            const data = JSON.parse(event.data);
+            outputTokens = data?.usage?.output_tokens ?? outputTokens;
+          } catch {
+            // skip
+          }
+        } else if (event.event === 'message_stop') {
+          completeCalled = true;
+          await callbacks.onComplete({
+            fullResponse: accumulatedText,
+            inputTokens,
+            outputTokens,
+          });
+        } else if (event.event === 'error') {
+          const error = { code: 'STREAM_ERROR', message: event.data };
+          await callbacks.onError(error);
+          return { success: false, error };
+        }
+      }
+    }
+
+    // Ensure onComplete is called even if message_stop was not received
+    if (!completeCalled) {
+      await callbacks.onComplete({
+        fullResponse: accumulatedText,
+        inputTokens,
+        outputTokens,
+      });
+    }
+
+    return { success: true, data: { vulnerabilities: allVulnerabilities } };
+  } catch (error) {
+    const errorObj = {
+      code: 'NETWORK_ERROR',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    };
+    await callbacks.onError(errorObj);
+    return { success: false, error: errorObj };
   }
 }

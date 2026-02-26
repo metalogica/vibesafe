@@ -1,6 +1,6 @@
 # Services Doctrine (Convex Actions + External APIs)
 
-**Version**: 1.2.0
+**Version**: 1.3.0
 **Status**: Binding
 **Date**: 2026-02-21
 **App**: Vibesafe
@@ -59,13 +59,15 @@ convex/
 │
 └── _generated/
 
-src/domain/audit/                  # Pure functions used by actions
-├── fileFilter.ts                  # Ingestion file inclusion rules
-├── tokenEstimator.ts              # Token budget + file priority
-├── evaluator.ts                   # Safety scoring + display formatting
-├── actionBudget.ts                # Wall-clock budget guard
-├── normalizeGitHubError.ts        # GitHub error classification
-└── sanitizeVulnerabilities.ts     # Post-Zod sanitization
+src/domain/audit/                        # Pure functions used by actions
+├── fileFilter.ts                        # Ingestion file inclusion rules
+├── tokenEstimator.ts                    # Token budget + file priority
+├── evaluator.ts                         # Safety scoring + display formatting
+├── actionBudget.ts                      # Wall-clock budget guard
+├── normalizeGitHubError.ts              # GitHub error classification
+├── sanitizeVulnerabilities.ts           # Post-Zod sanitization
+├── incrementalVulnerabilityParser.ts    # Streaming JSON parser (brace-depth state machine)
+└── sseParser.ts                         # Anthropic SSE event parser
 ```
 
 ---
@@ -195,134 +197,54 @@ export async function fetchBlob(
 
 ### 4.3 Claude Client
 
-Uses the Anthropic Messages API for security analysis.
+Uses the Anthropic Messages API for security analysis. Two variants:
+
+- **`runSecurityAnalysis`** (blocking) — waits for full response, returns parsed vulnerabilities. Kept for testing and non-streaming use cases.
+- **`runStreamingSecurityAnalysis`** (streaming, primary) — streams SSE events, fires callbacks for incremental text, parsed vulnerabilities, and completion. Used by `startAuditAction`.
 
 ```typescript
 // convex/clients/claude.ts
-
-import { z } from "zod";
-import {
-  ClaudeAnalysisResponseSchema,
-  type Vulnerability,
-} from "../services/schemas";
-
-const ANTHROPIC_API_BASE = "https://api.anthropic.com";
-const ANTHROPIC_VERSION = "2023-06-01";
-const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
 
 type ClaudeClientResult<T> =
   | { success: true; data: T }
   | { success: false; error: { code: string; message: string } };
 
+// Blocking variant (kept for backward compatibility and testing)
 export async function runSecurityAnalysis(
   files: { path: string; content: string }[],
-): Promise<ClaudeClientResult<{ vulnerabilities: Vulnerability[] }>> {
-  try {
-    const response = await fetch(`${ANTHROPIC_API_BASE}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.CLAUDE_CODE_API_KEY ?? "",
-        "anthropic-version": ANTHROPIC_VERSION,
-      },
-      body: JSON.stringify({
-        model: DEFAULT_MODEL,
-        max_tokens: 8192,
-        system: SECURITY_ANALYST_SYSTEM_PROMPT,
-        messages: [
-          {
-            role: "user",
-            content: buildAnalysisPrompt(files),
-          },
-        ],
-      }),
-    });
+): Promise<ClaudeClientResult<{ vulnerabilities: Vulnerability[] }>>;
 
-    if (!response.ok) {
-      if (response.status === 429) {
-        return {
-          success: false,
-          error: { code: "RATE_LIMIT", message: "Anthropic rate limit exceeded" },
-        };
-      }
-      return {
-        success: false,
-        error: { code: "CLAUDE_ERROR", message: `Anthropic API error: ${response.status}` },
-      };
-    }
-
-    const raw = await response.json();
-
-    // Validate Anthropic response shape
-    const anthropicParsed = AnthropicMessageSchema.safeParse(raw);
-    if (!anthropicParsed.success) {
-      return {
-        success: false,
-        error: { code: "INVALID_RESPONSE", message: "Invalid Anthropic response shape" },
-      };
-    }
-
-    const textContent = anthropicParsed.data.content[0]?.text;
-    if (!textContent) {
-      return {
-        success: false,
-        error: { code: "INVALID_RESPONSE", message: "Empty response from Claude" },
-      };
-    }
-
-    // Parse JSON from Claude's text response
-    let analysisJson: unknown;
-    try {
-      analysisJson = JSON.parse(textContent);
-    } catch {
-      return {
-        success: false,
-        error: { code: "INVALID_RESPONSE", message: "Claude response is not valid JSON" },
-      };
-    }
-
-    // Validate analysis structure
-    const analysisParsed = ClaudeAnalysisResponseSchema.safeParse(analysisJson);
-    if (!analysisParsed.success) {
-      return {
-        success: false,
-        error: { code: "INVALID_RESPONSE", message: analysisParsed.error.message },
-      };
-    }
-
-    return { success: true, data: analysisParsed.data };
-  } catch (error) {
-    return {
-      success: false,
-      error: {
-        code: "NETWORK_ERROR",
-        message: error instanceof Error ? error.message : "Unknown error",
-      },
-    };
-  }
+// Streaming variant (primary — used by startAuditAction)
+export interface StreamingCallbacks {
+  onTextDelta: (accumulatedText: string) => Promise<void>;
+  onVulnerabilityParsed: (vuln: Vulnerability, seqNumber: number) => Promise<void>;
+  onComplete: (result: {
+    fullResponse: string;
+    inputTokens: number;
+    outputTokens: number;
+  }) => Promise<void>;
+  onError: (error: { code: string; message: string }) => Promise<void>;
 }
 
-// Internal helpers
+export async function runStreamingSecurityAnalysis(
+  files: { path: string; content: string }[],
+  callbacks: StreamingCallbacks,
+): Promise<ClaudeClientResult<{ vulnerabilities: Vulnerability[] }>>;
 
-const AnthropicMessageSchema = z.object({
-  content: z.array(
-    z.object({
-      type: z.literal("text"),
-      text: z.string(),
-    }),
-  ),
-});
-
-const SECURITY_ANALYST_SYSTEM_PROMPT = `You are an expert security analyst...`;
-// Full prompt defined in convex/clients/claude.ts — see implementation.
-
-function buildAnalysisPrompt(files: { path: string; content: string }[]): string {
-  const fileContents = files
-    .map((f) => `// File: ${f.path}\n${f.content}`)
-    .join("\n\n---\n\n");
-  return `Analyze the following codebase for security vulnerabilities:\n\n${fileContents}\n\nIdentify all security vulnerabilities and respond with JSON.`;
-}
+// Prompt builder (exported for inference record capture)
+export function buildAnalysisPrompt(
+  files: { path: string; content: string }[],
+): string;
 ```
+
+**Streaming pipeline:**
+1. `fetch` with `stream: true` to Anthropic Messages API
+2. Parse SSE events via `createSSEParser()` (from `src/domain/audit/sseParser.ts`)
+3. Extract text deltas from `content_block_delta` events
+4. Feed text to `createIncrementalVulnerabilityParser()` for real-time vulnerability extraction
+5. Throttle `onTextDelta` callbacks (1000ms / 200 chars minimum between flushes)
+6. Fire `onVulnerabilityParsed` immediately when parser emits a complete object
+7. Fire `onComplete` on `message_stop` event with full response and token counts
 
 ---
 
@@ -399,6 +321,9 @@ export const startAudit = internalAction({
 | 1 | Action exceeds Convex 10-min limit | Wall-clock budget (`ACTION_BUDGET_MS = 540s`), file cap, try/catch envelope | `src/domain/audit/actionBudget.ts` |
 | 2 | GitHub rate limit classified as generic error | Centralised `normalizeGitHubError` used by both `fetchRepoTree` and `fetchBlob` | `src/domain/audit/normalizeGitHubError.ts` |
 | 3 | Claude returns valid JSON with bad semantics | Post-Zod sanitiser: clamp field lengths, enforce severity enum, cap at 50 vulns | `src/domain/audit/sanitizeVulnerabilities.ts` |
+| 4 | Excessive streaming mutations overload Convex | Throttle `updateStreamingText` to max 1 mutation/sec with 200 char minimum delta | `convex/clients/claude.ts` (throttle logic in streaming loop) |
+| 5 | Stream drops midway (network error) | `onError` callback marks inference as failed; try/catch envelope marks audit as failed; partial vulnerabilities already inserted remain visible | `convex/services/startAuditAction.ts` |
+| 6 | Individual vulnerability object malformed during stream | Incremental parser skips invalid objects (Zod safeParse failure), continues parsing remaining | `src/domain/audit/incrementalVulnerabilityParser.ts` |
 
 These mitigations are MANDATORY for any new action that calls external APIs or processes untrusted input.
 
@@ -415,6 +340,7 @@ These mitigations are MANDATORY for any new action that calls external APIs or p
 | `GITHUB_ERROR` | GitHub | Other GitHub API error |
 | `CLAUDE_ERROR` | Claude | Anthropic API failure |
 | `INVALID_RESPONSE` | Claude | Response failed Zod validation |
+| `STREAM_ERROR` | Claude | SSE stream error event received |
 | `NETWORK_ERROR` | Any | Fetch failed |
 | `BUDGET_EXCEEDED` | Action | Wall-clock time or file cap exceeded |
 
@@ -446,6 +372,9 @@ MUST NOT commit secrets. MUST use Convex environment variables for server-side k
 - Actions MUST apply `sanitizeVulnerabilities()` after Zod parse, before database insertion
 - Actions MUST propagate RATE_LIMIT errors immediately (not skip with `continue`)
 - Actions MUST update audit status on failure
+- Actions MUST create an `audit_inferences` record before streaming and ensure it reaches terminal state (`complete` or `failed`)
+- Actions MUST throttle streaming text DB updates (max 1/sec, 200 char minimum delta)
+- Actions MUST use `runStreamingSecurityAnalysis` (not blocking variant) for the analysis phase
 - SHOULD log errors server-side for debugging
 
 ---
@@ -529,4 +458,5 @@ If Vibesafe grows:
 |---------|------|---------|
 | 1.0.0 | 2026-02-21 | Initial services doctrine for Vibesafe |
 | 1.2.0 | 2026-02-21 | Unified startAuditAction (ingest+analyze+evaluate), FMEA mitigations (action budget, normalizeGitHubError, sanitizeVulnerabilities), domain pure function imports, impact field in Zod schema |
+| 1.3.0 | 2026-02-26 | Realtime streaming: added runStreamingSecurityAnalysis with SSE parsing, incremental vulnerability parser, streaming callbacks, throttled DB updates, new FMEA mitigations (#4-#6), STREAM_ERROR code |
 | 1.1.0 | 2026-02-21 | Replace MinMax/Retrvr with Anthropic Claude API; update all client patterns, schemas, error codes, env vars, and test examples to match implementation |

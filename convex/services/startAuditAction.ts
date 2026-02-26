@@ -5,7 +5,7 @@ import { internalAction } from '../_generated/server';
 import { internal } from '../_generated/api';
 import type { Id } from '../_generated/dataModel';
 import { fetchBlob, fetchRepoTree } from '../clients/github';
-import { runSecurityAnalysis } from '../clients/claude';
+import { buildAnalysisPrompt, runStreamingSecurityAnalysis } from '../clients/claude';
 import { shouldIncludeFile } from '../../src/domain/audit/fileFilter';
 import {
   TOKEN_LIMIT,
@@ -165,40 +165,86 @@ async function runAuditPipeline(
 
   await ctx.runMutation(internal.audits.updateStatus, { auditId, status: 'analyzing' });
 
-  const analysisResult = await runSecurityAnalysis(files);
+  // Create inference record for transparency
+  const promptText = buildAnalysisPrompt(files);
+  const inferenceId = await ctx.runMutation(internal.inferences.create, {
+    auditId,
+    agent: 'SECURITY_ANALYST',
+    model: 'claude-sonnet-4-5-20250929',
+    prompt: promptText,
+  });
+
+  let seqCounter = 0;
+  let lastFlushTime = Date.now();
+  const FLUSH_INTERVAL_MS = 1000;
+  const MIN_FLUSH_CHARS = 200;
+  let lastFlushedLength = 0;
+  const vulnerabilities: ReturnType<typeof sanitizeVulnerabilities> = [];
+
+  const analysisResult = await runStreamingSecurityAnalysis(files, {
+    onTextDelta: async (accumulatedText) => {
+      const now = Date.now();
+      const charsSinceFlush = accumulatedText.length - lastFlushedLength;
+      if (now - lastFlushTime >= FLUSH_INTERVAL_MS && charsSinceFlush >= MIN_FLUSH_CHARS) {
+        await ctx.runMutation(internal.inferences.updateStreamingText, {
+          inferenceId,
+          streamingText: accumulatedText,
+        });
+        lastFlushTime = now;
+        lastFlushedLength = accumulatedText.length;
+      }
+    },
+
+    onVulnerabilityParsed: async (vuln, _parserSeqNumber) => {
+      seqCounter++;
+      const sanitized = sanitizeVulnerabilities([vuln as Record<string, unknown>]);
+      if (sanitized.length === 0) return;
+
+      const v = sanitized[0];
+      vulnerabilities.push(v);
+      const displayId = generateDisplayId(auditId, seqCounter);
+
+      const analysisId = await ctx.runMutation(internal.analyses.create, {
+        auditId,
+        seqNumber: seqCounter,
+        displayId,
+        category: v.category,
+        level: v.level,
+        title: v.title,
+        description: v.description,
+        impact: v.impact,
+        filePath: v.filePath,
+        fix: v.fix,
+      });
+
+      await ctx.runMutation(internal.auditEvents.create, {
+        auditId,
+        agent: 'SECURITY_ANALYST',
+        message: generateAnalystMessage(v, displayId),
+        analysisId,
+      });
+    },
+
+    onComplete: async ({ fullResponse, inputTokens, outputTokens }) => {
+      await ctx.runMutation(internal.inferences.complete, {
+        inferenceId,
+        response: fullResponse,
+        inputTokens,
+        outputTokens,
+      });
+    },
+
+    onError: async (error) => {
+      await ctx.runMutation(internal.inferences.fail, {
+        inferenceId,
+        error: error.message,
+      });
+    },
+  });
+
   if (!analysisResult.success) {
     await ctx.runMutation(internal.audits.fail, { auditId, error: analysisResult.error.message });
     return;
-  }
-
-  const vulnerabilities = sanitizeVulnerabilities(
-    analysisResult.data.vulnerabilities as Record<string, unknown>[],
-  );
-
-  for (let i = 0; i < vulnerabilities.length; i++) {
-    const vuln = vulnerabilities[i];
-    const seqNumber = i + 1;
-    const displayId = generateDisplayId(auditId, seqNumber);
-
-    const analysisId = await ctx.runMutation(internal.analyses.create, {
-      auditId,
-      seqNumber,
-      displayId,
-      category: vuln.category,
-      level: vuln.level,
-      title: vuln.title,
-      description: vuln.description,
-      impact: vuln.impact,
-      filePath: vuln.filePath,
-      fix: vuln.fix,
-    });
-
-    await ctx.runMutation(internal.auditEvents.create, {
-      auditId,
-      agent: 'SECURITY_ANALYST',
-      message: generateAnalystMessage(vuln, displayId),
-      analysisId,
-    });
   }
 
   // === EVALUATION PHASE ===

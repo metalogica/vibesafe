@@ -1,6 +1,6 @@
 # Database Doctrine (Convex)
 
-**Version**: 1.1.0
+**Version**: 1.2.0
 **Status**: Binding
 **Date**: 2026-02-21
 **App**: Vibesafe
@@ -26,7 +26,7 @@ Keywords MUST, MUST NOT, SHOULD, MAY follow RFC 2119.
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │                      Tables                               │   │
 │  │  audits · audit_events · audit_analyses                   │   │
-│  │  audit_evaluations                                        │   │
+│  │  audit_evaluations · audit_inferences                     │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
@@ -105,6 +105,23 @@ export default defineSchema({
     executiveSummary: v.string(),
     vulnerabilityCount: v.number(),  // Avoids N+1 queries for chart data
   }).index("by_audit", ["auditId"]),
+
+  audit_inferences: defineTable({
+    auditId: v.id("audits"),
+    agent: v.string(),               // 'SECURITY_ANALYST' (extensible for future agents)
+    model: v.string(),               // 'claude-sonnet-4-5-20250929'
+    prompt: v.string(),              // Full prompt sent to Claude
+    response: v.optional(v.string()),// Complete response text (set on completion)
+    streamingText: v.string(),       // Accumulated text (updated during streaming)
+    status: v.union(
+      v.literal("streaming"),
+      v.literal("complete"),
+      v.literal("failed"),
+    ),
+    inputTokens: v.optional(v.number()),
+    outputTokens: v.optional(v.number()),
+    error: v.optional(v.string()),
+  }).index("by_audit", ["auditId"]),
 });
 ```
 
@@ -132,6 +149,7 @@ convex/
 ├── auditEvents.ts            # Feed event CRUD
 ├── analyses.ts               # Analysis CRUD
 ├── evaluations.ts            # Evaluation CRUD
+├── inferences.ts             # Inference CRUD (streaming text, prompt/response storage)
 ├── clients/
 │   ├── github.ts             # GitHub REST API client
 │   └── claude.ts             # Anthropic Messages API client
@@ -332,7 +350,8 @@ For the agent activity feed, insert `audit_analyses` rows as they're generated �
 **Transition Rules:**
 - MUST transition through states in order (no skipping)
 - MUST set `failed` on unrecoverable error (with error in evaluation summary)
-- Analyses MAY be written incrementally during `analyzing` state
+- Analyses MUST be written incrementally during `analyzing` state (streamed from Claude)
+- An `audit_inferences` record tracks the streaming lifecycle (`streaming → complete | failed`)
 
 ---
 
@@ -398,6 +417,7 @@ For the agent activity feed, insert `audit_analyses` rows as they're generated �
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.2.0 | 2026-02-26 | Realtime streaming: added audit_inferences table for prompt/response storage and streaming text, updated state machine transition rules |
 | 1.1.0 | 2026-02-21 | Audit feature: added audit_events table, fetching status, optional commitHash, impact field, vulnerabilityCount, updated state machine and action patterns |
 | 1.0.0 | 2026-02-21 | Initial Convex database doctrine for Vibesafe |
 

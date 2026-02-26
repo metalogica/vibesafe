@@ -1,6 +1,6 @@
 # Domain Logic Doctrine (Convex)
 
-**Version**: 1.1.0
+**Version**: 1.2.0
 **Status**: Binding
 **Date**: 2026-02-21
 **App**: Vibesafe
@@ -50,14 +50,16 @@ Extract logic into `src/domain/` when it meets ANY of these criteria:
 ## 3. Where Logic Lives
 
 ```
-src/domain/audit/                   # Pure functions (shared, testable)
-├── parseGitHubUrl.ts               # URL parsing + validation
-├── fileFilter.ts                   # Ingestion file inclusion rules
-├── tokenEstimator.ts               # Token budget + file priority
-├── evaluator.ts                    # Safety scoring + display formatting
-├── actionBudget.ts                 # Wall-clock budget guard (FMEA #1)
-├── normalizeGitHubError.ts         # GitHub error classification (FMEA #2)
-└── sanitizeVulnerabilities.ts      # Post-Zod sanitization (FMEA #3)
+src/domain/audit/                        # Pure functions (shared, testable)
+├── parseGitHubUrl.ts                    # URL parsing + validation
+├── fileFilter.ts                        # Ingestion file inclusion rules
+├── tokenEstimator.ts                    # Token budget + file priority
+├── evaluator.ts                         # Safety scoring + display formatting
+├── actionBudget.ts                      # Wall-clock budget guard (FMEA #1)
+├── normalizeGitHubError.ts              # GitHub error classification (FMEA #2)
+├── sanitizeVulnerabilities.ts           # Post-Zod sanitization (FMEA #3)
+├── incrementalVulnerabilityParser.ts    # Streaming JSON brace-depth parser (FMEA #6)
+└── sseParser.ts                         # Anthropic SSE event parser
 
 convex/
 ├── schema.ts                       # Types + validation (source of truth)
@@ -261,5 +263,6 @@ This is a refactor, not a rewrite. The pure functions already extracted to `src/
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.2.0 | 2026-02-26 | Realtime streaming: added incrementalVulnerabilityParser.ts (brace-depth state machine) and sseParser.ts (Anthropic SSE parsing) to domain pure functions |
 | 1.1.0 | 2026-02-21 | Audit feature: introduced src/domain/audit/ pure function layer for shared/testable/safety-critical logic; updated extraction criteria and testing patterns |
 | 1.0.0 | 2026-02-21 | Initial doctrine — documented decision to skip domain layer |

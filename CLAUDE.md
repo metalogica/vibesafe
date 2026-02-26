@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Vibesafe is a webapp that runs AI-powered security audits on codebases. Users paste a public GitHub repo URL, the system ingests source code, runs it through a MinMax AI security analysis agent, and produces a safety probability score with detailed vulnerability findings in a real-time activity feed.
 
+## Pre-Implementation Checklist
+
+Before writing any code, MUST:
+1. Read relevant doctrine files
+2. Read the protocol for current feature
+3. Confirm schema matches protocol
+4. List unknowns and ask if not covered
+
 ## Commands
 
 ```bash

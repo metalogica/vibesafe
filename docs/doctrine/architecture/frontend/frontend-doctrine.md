@@ -1,6 +1,6 @@
 # Frontend Doctrine (Next.js + React + Convex)
 
-**Version**: 1.2.0
+**Version**: 1.3.0
 **Status**: Binding
 **Date**: 2026-02-21
 **App**: Vibesafe
@@ -185,7 +185,27 @@ const events = useQuery(api.auditEvents.listByAudit, currentAuditId ? { auditId:
 const analyses = useQuery(api.analyses.listByAudit, currentAuditId ? { auditId: currentAuditId } : 'skip');
 ```
 
-### 5.4 Mapper Pattern (Convex Doc → View Model)
+### 5.4 Streaming Inference Subscription
+
+For real-time streaming text display, subscribe to the active streaming inference:
+
+```typescript
+const streamingInference = useQuery(
+  api.inferences.getStreamingByAudit,
+  currentAuditId ? { auditId: currentAuditId } : 'skip',
+);
+
+// Pass streaming text to display components
+<AgentFeed
+  messages={messages}
+  isAuditing={uiStatus === 'auditing'}
+  streamingText={streamingInference?.streamingText ?? null}
+/>
+```
+
+The query returns `null` when no inference is actively streaming. Components receiving `streamingText` SHOULD render it in a dedicated streaming block with a visual indicator (e.g., `animate-pulse` label).
+
+### 5.5 Mapper Pattern (Convex Doc → View Model)
 
 Convex `Doc<'table'>` types contain backend fields (`_id`, `_creationTime`, backend enum values). Frontend components use view model types. Mappers bridge the two:
 
@@ -211,7 +231,7 @@ export function mapAnalysisToVulnerability(analysis: Doc<'audit_analyses'>): Vul
 MUST use mappers when Convex types and view model types diverge. MUST test mappers with contract tests (see Section 11).
 ```
 
-### 5.5 Mutations (Create + Schedule Pattern)
+### 5.6 Mutations (Create + Schedule Pattern)
 
 The preferred pattern is a mutation that creates a record and schedules a backend action. The frontend calls the mutation and tracks the audit ID for subscriptions:
 
@@ -511,4 +531,5 @@ This is a refactor, not a rewrite.
 |---------|------|---------|
 | 1.0.0 | 2026-02-21 | Initial minimal frontend doctrine for Vibesafe |
 | 1.2.0 | 2026-02-21 | Convex integration: removed mock data patterns, added mapper pattern (Doc → view model), conditional query skip, derived state with useMemo, create+schedule mutation pattern, contract test guidance |
+| 1.3.0 | 2026-02-26 | Realtime streaming: added streaming inference subscription pattern (Section 5.4), streamingText prop pattern for AgentFeed |
 | 1.1.0 | 2026-02-21 | Updated for Next.js 16 App Router: directory structure, path aliases, `'use client'` patterns, VibeSafe design tokens, mock state section |
